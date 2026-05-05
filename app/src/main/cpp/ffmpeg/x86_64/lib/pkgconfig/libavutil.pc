@@ -1,0 +1,14 @@
+prefix=/mnt/c/Users/48716/source/UVCAndroid-main/libuvccamera/src/main/jni/ffmpeg/x86_64
+exec_prefix=${prefix}
+libdir=/mnt/c/Users/48716/source/UVCAndroid-main/libuvccamera/src/main/jni/ffmpeg/x86_64/lib
+includedir=/mnt/c/Users/48716/source/UVCAndroid-main/libuvccamera/src/main/jni/ffmpeg/x86_64/include
+
+Name: libavutil
+Description: FFmpeg utility library
+Version: 60.30.100
+Requires: 
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavutil -lm -latomic -landroid -lmediandk -pthread
+Libs.private: 
+Cflags: -I${includedir}

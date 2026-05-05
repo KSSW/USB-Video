@@ -1,0 +1,352 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <!-- Speaker Status Banner -->
+        <TextView
+            android:id="@+id/tvSpeakerStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Speaker detection..."
+            android:textSize="13sp"
+            android:textColor="#FF9800"
+            android:background="#1AFF9800"
+            android:padding="8dp"
+            android:layout_marginBottom="16dp" />
+
+        <!-- ====== Audio Decoder Section ====== -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Audio Decoder"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="?attr/colorPrimary"
+            android:layout_marginBottom="12dp" />
+
+        <!-- Audio Output Device -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Audio Output Device"
+            android:textSize="14sp"
+            android:layout_marginBottom="4dp" />
+        <Spinner
+            android:id="@+id/spinnerOutputDevice"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginBottom="12dp" />
+
+        <!-- Channel Count -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Channel Count"
+            android:textSize="14sp"
+            android:layout_marginBottom="4dp" />
+        <Spinner
+            android:id="@+id/spinnerChannelCount"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginBottom="12dp" />
+
+        <!-- Output Configuration -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Output Configuration"
+            android:textSize="14sp"
+            android:layout_marginBottom="4dp" />
+        <Spinner
+            android:id="@+id/spinnerOutputConfig"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginBottom="12dp" />
+
+        <!-- Volume Control Steps -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Volume Control Steps"
+                android:textSize="14sp" />
+            <TextView
+                android:id="@+id/tvVolumeSteps"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="90"
+                android:textSize="14sp"
+                android:gravity="end" />
+            <SeekBar
+                android:id="@+id/seekVolumeSteps"
+                android:layout_width="120dp"
+                android:layout_height="wrap_content"
+                android:max="100"
+                android:progress="90"
+                android:layout_marginStart="8dp" />
+        </LinearLayout>
+
+        <!-- Keep Original Volume on Downmix -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Keep Original Volume on Downmix"
+                android:textSize="14sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchKeepVolume"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- Stereo Upmix -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Stereo Upmix"
+                android:textSize="14sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchStereoUpmix"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- Resample Quality -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Resample Quality"
+            android:textSize="14sp"
+            android:layout_marginBottom="4dp" />
+        <Spinner
+            android:id="@+id/spinnerResampleQuality"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginBottom="12dp" />
+
+        <!-- Keep Audio Device Alive -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Keep Audio Device Alive"
+                android:textSize="14sp" />
+            <Spinner
+                android:id="@+id/spinnerKeepAlive"
+                android:layout_width="100dp"
+                android:layout_height="48dp" />
+        </LinearLayout>
+
+        <!-- Send Low Volume Noise -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Send Low Volume Noise"
+                android:textSize="14sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchLowNoise"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- Play UI Sounds -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Play UI Sounds"
+            android:textSize="14sp"
+            android:layout_marginBottom="4dp" />
+        <Spinner
+            android:id="@+id/spinnerUiSounds"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginBottom="20dp" />
+
+        <!-- ====== Passthrough Section ====== -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Audio Passthrough"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="?attr/colorPrimary"
+            android:layout_marginBottom="12dp" />
+
+        <!-- Enable Passthrough -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Enable Passthrough"
+                android:textSize="14sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchPassthrough"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- Passthrough Output Device -->
+        <TextView
+            android:id="@+id/tvPassthroughDevice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Passthrough Output Device"
+            android:textSize="14sp"
+            android:layout_marginBottom="4dp" />
+        <Spinner
+            android:id="@+id/spinnerPassthroughDevice"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginBottom="12dp" />
+
+        <!-- AC3 (Dolby Digital) -->
+        <LinearLayout
+            android:id="@+id/layoutAC3"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Dolby Digital (AC3) Passthrough"
+                android:textSize="14sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchAC3"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- AC3 Transcoding -->
+        <LinearLayout
+            android:id="@+id/layoutAC3Transcoding"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp"
+            android:paddingStart="16dp">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="- Enable Dolby Digital (AC3) transcoding"
+                android:textSize="14sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchAC3Transcoding"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- DTS -->
+        <LinearLayout
+            android:id="@+id/layoutDTS"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="DTS Passthrough"
+                android:textSize="14sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchDTS"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- DTS-HD -->
+        <LinearLayout
+            android:id="@+id/layoutDTSHD"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="DTS-HD Passthrough"
+                android:textSize="14sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchDTSHD"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- Reset to defaults -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnResetDefaults"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Reset to Defaults"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_marginTop="8dp" />
+
+        <!-- Capabilities info -->
+        <TextView
+            android:id="@+id/tvCapabilities"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="11sp"
+            android:textColor="#888888"
+            android:typeface="monospace"
+            android:layout_marginTop="16dp"
+            android:padding="8dp"
+            android:background="#0A000000" />
+
+    </LinearLayout>
+</ScrollView>

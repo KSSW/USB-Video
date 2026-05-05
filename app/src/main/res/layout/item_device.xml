@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="12dp"
+    android:background="?attr/selectableItemBackground"
+    android:descendantFocusability="blocksDescendants">
+
+    <ImageView
+        android:id="@+id/ivDeviceIcon"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_centerVertical="true"
+        android:src="@android:drawable/ic_menu_camera"
+        android:tint="#CCCCCC"
+        android:contentDescription="Device icon" />
+
+    <TextView
+        android:id="@+id/tvProductName"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toEndOf="@id/ivDeviceIcon"
+        android:layout_marginStart="12dp"
+        android:textColor="@android:color/black"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        tools:text="USB Capture Card" />
+
+    <TextView
+        android:id="@+id/tvDeviceInfo"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/tvProductName"
+        android:layout_toEndOf="@id/ivDeviceIcon"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="2dp"
+        android:textColor="@android:color/darker_gray"
+        android:textSize="13sp"
+        tools:text="VID:1234 PID:5678" />
+
+</RelativeLayout>

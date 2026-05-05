@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+Copyright (c) Meta Platforms, Inc. and affiliates.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<resources>
+  <!-- Note: this file is not included in i18n. Use strings.xml for your translatable strings. -->
+  <string name="app_name" translatable="false">USB Video</string>
+  <string name="app_description" translatable="false">Big screen gaming and entertainment</string>
+  <string name="app_requirements" translatable="false">A USB capture card and HDMI/DisplayPort source is required.</string>
+  <string name="app_permissions_explanation" translatable="false">❓Camera and Record Audio permissions are required to operate USB capture card.</string>
+  <string name="app_permissions_granted" translatable="false">✔ App permissions granted</string>
+  <string name="app_permissions_denied" translatable="false">✖ Missing Camera and Record Audio permissions required to operate USB capture card. Open your settings to change this under Apps > Installed > USB Video</string>
+  <string name="camera_permission_denied" translatable="false">✖ Missing Camera permission to operate USB capture card. Open your settings to change this under Apps > Installed > </string>
+  <string name="record_audio_permission_denied" translatable="false">✖ Missing Record Audio permission to operate USB capture card. Open your settings to change this under Apps > Installed > USB Video</string>
+  <string name="start_streaming" translatable="false">Start Streaming</string>
+  <string name="device_connected" translatable="false">✔ USB capture card connected</string>
+  <string name="device_connected_with_details" translatable="false">✔ Connected to %1$s at %2$s Speed</string>
+  <string name="audio_streaming_wait_state" translatable="false">Starting audio…</string>
+  <string name="audio_streaming_success" translatable="false">✔ Audio streaming</string>
+  <string name="audio_streaming_failure" translatable="false">✖ Audio streaming failure. %1$s</string>
+  <string name="audio_streaming_stopped" translatable="false">✖ Audio streaming stopped.</string>
+  <string name="video_streaming_wait_state" translatable="false">Starting video…</string>
+  <string name="video_streaming_success" translatable="false">✔ Video streaming</string>
+  <string name="video_streaming_failure" translatable="false">✖ Video streaming failure.  %1$s</string>
+  <string name="video_streaming_stopped" translatable="false">✖ Video streaming stopped.</string>
+  <string name="uvc_device_found" translatable="false">✔ USB capture card detected</string>
+  <string name="uvc_device_not_found" translatable="false">✖ No USB capture card detected</string>
+  <string name="uvc_device_attached" translatable="false">✔ USB capture card detected</string>
+  <string name="uvc_device_detached" translatable="false">✖ USB capture card disconnected</string>
+  <string name="uvc_device_permission_denied" translatable="false">✖ USB permission denied</string>
+  <string name="uvc_device_permission_granted" translatable="false">✔ USB device permission granted</string>
+  <string name="uvc_device_permission_required" translatable="false">❓USB device permission required</string>
+  <string name="uvc_device_permission_requested" translatable="false">❓USB device permission requested</string>
+  <string name="streaming_stats_toggle_tip" translatable="false">Tap on screen to toggle stats</string>
+
+  <!-- PreviewActivity strings -->
+  <string name="connect_usb_tip" translatable="false">Connect USB capture card</string>
+  <string name="action_take_picture" translatable="false">Take Picture</string>
+  <string name="action_record_video" translatable="false">Record Video</string>
+  <string name="action_settings" translatable="false">Settings</string>
+  <string name="action_video_format" translatable="false">Video Format</string>
+  <string name="action_device_info" translatable="false">Device Info</string>
+  <string name="action_toggle_stats" translatable="false">Toggle Stats</string>
+  <string name="action_safely_eject" translatable="false">Safely Eject</string>
+  <string name="action_xbmc_audio" translatable="false">xbmc-Audio</string>
+  <string name="preview_info_format" translatable="false">%1$s  %2$dx%3$d  %4$dfps</string>
+  <string name="record_time_format" translatable="false">%1$s</string>
+  <string name="screenshot_saved" translatable="false">Screenshot saved: %1$s</string>
+  <string name="recording_saved" translatable="false">Recording saved: %1$s</string>
+  <string name="recording_started" translatable="false">Recording started</string>
+  <string name="recording_stopped" translatable="false">Recording stopped</string>
+  <string name="no_device_connected" translatable="false">No device connected</string>
+  <string name="select_video_format" translatable="false">Select Video Format</string>
+  <string name="settings_title" translatable="false">Settings</string>
+  <string name="action_select_device" translatable="false">Select Device</string>
+  <string name="device_list_title" translatable="false">USB Capture Devices</string>
+  <string name="device_list_empty" translatable="false">No USB capture devices found</string>
+
+</resources>

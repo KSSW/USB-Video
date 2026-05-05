@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    tools:context="com.meta.usbvideo.ui.PreviewActivity">
+
+    <!-- Video fills entire screen -->
+    <RelativeLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <!-- Video preview container -->
+        <com.meta.usbvideo.ui.VideoContainerView
+            android:id="@+id/viewMainPreview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_centerInParent="true"
+            android:visibility="invisible" />
+
+        <!-- Connect USB tip -->
+        <LinearLayout
+            android:id="@+id/connectTipContainer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_centerInParent="true"
+            android:orientation="vertical"
+            android:gravity="center_horizontal">
+
+            <TextView
+                android:id="@+id/tvConnectUSBCameraTip"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/connect_usb_tip"
+                android:textColor="@android:color/white"
+                android:textSize="20sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSelectDevice"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/action_select_device"
+                android:textColor="@android:color/white"
+                app:backgroundTint="#555555"
+                app:icon="@android:drawable/ic_menu_search"
+                app:iconTint="@android:color/white"
+                app:cornerRadius="24dp" />
+        </LinearLayout>
+
+        <!-- Record time display -->
+        <TextView
+            android:id="@+id/tvVideoRecordTime"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_centerHorizontal="true"
+            android:layout_marginTop="20dp"
+            android:drawablePadding="5dp"
+            android:textColor="@android:color/white"
+            android:textSize="14sp"
+            android:visibility="gone"
+            tools:text="00:00:00" />
+
+        <!-- Preview info (format, resolution, fps) -->
+        <TextView
+            android:id="@+id/tvPreviewInfo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentStart="true"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="20dp"
+            android:textColor="@android:color/white"
+            android:textSize="13sp"
+            android:visibility="gone"
+            tools:text="MJPG  1920x1080  60fps" />
+
+        <!-- Audio Level Meter overlay -->
+        <com.meta.usbvideo.ui.AudioLevelMeterView
+            android:id="@+id/audioLevelMeter"
+            android:layout_width="80dp"
+            android:layout_height="wrap_content"
+            android:layout_below="@id/tvPreviewInfo"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="20dp"
+            android:visibility="gone" />
+
+        <!-- Streaming stats overlay -->
+        <TextView
+            android:id="@+id/tvStreamingStats"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentStart="true"
+            android:layout_alignParentBottom="true"
+            android:layout_marginStart="16dp"
+            android:layout_marginBottom="16dp"
+            android:layout_marginEnd="16dp"
+            android:background="@color/overlaySurface"
+            android:padding="8dp"
+            android:textColor="@android:color/white"
+            android:textSize="12sp"
+            android:maxLines="3"
+            android:visibility="gone" />
+
+        <!-- FAB: Take Picture -->
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabPicture"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentEnd="true"
+            android:layout_alignParentBottom="true"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="16dp"
+            android:visibility="gone"
+            android:contentDescription="@string/action_take_picture"
+            app:backgroundTint="@android:color/white"
+            app:tint="@android:color/black"
+            app:fabSize="normal"
+            app:srcCompat="@android:drawable/ic_menu_camera" />
+
+        <!-- FAB: Record Video -->
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabVideo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_above="@id/fabPicture"
+            android:layout_alignParentEnd="true"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="16dp"
+            android:visibility="gone"
+            android:contentDescription="@string/action_record_video"
+            app:backgroundTint="@android:color/white"
+            app:tint="@android:color/black"
+            app:fabSize="normal"
+            app:srcCompat="@android:drawable/presence_video_online" />
+
+        <!-- Menu button (three dots) -->
+        <ImageButton
+            android:id="@+id/btnMenu"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_alignParentTop="true"
+            android:layout_alignParentEnd="true"
+            android:layout_marginEnd="8dp"
+            android:layout_marginTop="8dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@android:drawable/ic_menu_more"
+            android:tint="@android:color/white"
+            android:visibility="gone"
+            android:contentDescription="Menu" />
+
+    </RelativeLayout>
+
+</FrameLayout>

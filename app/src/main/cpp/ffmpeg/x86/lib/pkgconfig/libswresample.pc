@@ -1,0 +1,14 @@
+prefix=/mnt/c/Users/48716/source/UVCAndroid-main/libuvccamera/src/main/jni/ffmpeg/x86
+exec_prefix=${prefix}
+libdir=/mnt/c/Users/48716/source/UVCAndroid-main/libuvccamera/src/main/jni/ffmpeg/x86/lib
+includedir=/mnt/c/Users/48716/source/UVCAndroid-main/libuvccamera/src/main/jni/ffmpeg/x86/include
+
+Name: libswresample
+Description: FFmpeg audio resampling library
+Version: 6.4.100
+Requires: libavutil >= 60.30.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lswresample -lm -latomic
+Libs.private: 
+Cflags: -I${includedir}
