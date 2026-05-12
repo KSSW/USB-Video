@@ -82,6 +82,9 @@ UsbVideoStreamer::UsbVideoStreamer(
   // Enumerate UVC Extension Units to check for audio-related capabilities
   enumerateExtensionUnits();
 
+  // Attempt to capture HDMI InfoFrames to check for multichannel audio metadata
+  captureHdmiInfoFrames();
+
   res = uvc_get_stream_ctrl_format_size(
       deviceHandle_,
       &streamCtrl_, /* result stored in ctrl */
@@ -224,6 +227,100 @@ void UsbVideoStreamer::enumerateExtensionUnits() {
   ULOGI("UVC XU Diagnostics:\n%s", log.c_str());
 }
 
+void UsbVideoStreamer::captureHdmiInfoFrames() {
+  if (!deviceHandle_ || !deviceHandle_->usb_devh) {
+    hdmiInfoFrameLog_ = "No USB device handle";
+    return;
+  }
+
+  std::string log;
+  log += "=== HDMI InfoFrame Capture Attempt ===\n";
+
+  // Attempt to read HDMI metadata via USB control endpoint
+  // Common vendor-specific control requests for HDMI capture devices:
+  // - Some devices expose HDMI InfoFrames through vendor-specific control requests
+  // - Control request format: bmRequestType=0xC1 (vendor-in), bRequest=vendor-specific
+  
+  uint8_t buffer[256] = {0};
+  int transferred = 0;
+  
+  // Try common vendor-specific request codes for HDMI metadata
+  // These are speculative based on common patterns in capture card firmwares
+  const uint8_t vendor_requests[] = {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xB0, 0xB1, 0xC0, 0xC1};
+  
+  for (uint8_t req : vendor_requests) {
+    int result = libusb_control_transfer(
+      deviceHandle_->usb_devh,
+      LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN | LIBUSB_RECIPIENT_DEVICE,
+      req,
+      0x0000,  // wValue
+      0x0000,  // wIndex
+      buffer,
+      sizeof(buffer),
+      1000     // timeout 1s
+    );
+    
+    if (result > 0 && result < (int)sizeof(buffer)) {
+      char buf[512];
+      snprintf(buf, sizeof(buf), "Vendor req 0x%02x: %d bytes\n", req, result);
+      log += buf;
+      
+      // Hex dump
+      for (int i = 0; i < result && i < 64; i++) {
+        char hex[8];
+        snprintf(hex, sizeof(hex), "%02x ", buffer[i]);
+        log += hex;
+        if (i % 16 == 15) log += "\n";
+      }
+      log += "\n";
+      
+      // Try to parse as HDMI Audio InfoFrame (CEA-861-D)
+      // Audio InfoFrame starts with 0x84 header
+      if (buffer[0] == 0x84) {
+        log += ">>> Detected HDMI Audio InfoFrame!\n";
+        uint8_t length = buffer[1];
+        uint8_t version = buffer[2];
+        uint8_t audioChannels = buffer[3] & 0x07;  // bits 0-2
+        uint8_t codingType = (buffer[4] >> 4) & 0x0F;  // bits 4-7
+        uint8_t sampleFreq = buffer[5] & 0x07;  // bits 0-2
+        uint8_t sampleSize = (buffer[6] >> 4) & 0x03;  // bits 4-5
+        uint8_t channelAlloc = buffer[7];
+        
+        snprintf(buf, sizeof(buf), 
+          "  Length: %d, Version: %d\n"
+          "  Audio Channels: %d (0=2ch, 4=6ch, 6=8ch)\n"
+          "  Coding Type: %d (1=LPCM, 2=AC3, 6=DTS)\n"
+          "  Sample Freq: %d (3=48kHz, 5=96kHz)\n"
+          "  Sample Size: %d (1=16bit, 3=24bit)\n"
+          "  Channel Alloc: 0x%02x\n",
+          length, version, audioChannels, codingType, sampleFreq, sampleSize, channelAlloc);
+        log += buf;
+      }
+    }
+  }
+  
+  // Also try reading from UVC control interface (if device exposes HDMI metadata there)
+  // Try unit 0-10 and control 0-255 combinations for potential HDMI metadata
+  for (uint8_t unit = 0; unit <= 10; unit++) {
+    for (uint8_t ctrl = 0; ctrl < 16; ctrl++) {
+      uint8_t data[32] = {0};
+      int len = uvc_get_ctrl(deviceHandle_, unit, ctrl, data, sizeof(data), UVC_GET_CUR);
+      if (len > 0) {
+        // Check if data looks like HDMI InfoFrame (starts with 0x84 for Audio InfoFrame)
+        if (data[0] == 0x84 || data[0] == 0x00 || data[0] == 0x01) {
+          char buf[256];
+          snprintf(buf, sizeof(buf), "UVC ctrl unit=%d ctrl=%d: %d bytes, first=0x%02x\n",
+                   unit, ctrl, len, data[0]);
+          log += buf;
+        }
+      }
+    }
+  }
+  
+  hdmiInfoFrameLog_ = log;
+  ULOGI("HDMI InfoFrame Capture:\n%s", log.c_str());
+}
+
 bool UsbVideoStreamer::configureOutput(ANativeWindow* previewWindow) {
   if (!isStreamControlNegotiated_) {
     return false;
@@ -287,10 +384,16 @@ bool UsbVideoStreamer::stop() {
 
 bool UsbVideoStreamer::startRecording(const char* path, uvc::ContainerFormat container,
                                       int audioSampleRate, int audioChannels, int audioBitsPerSample) {
+  lastRecordingError_.clear();
   if (recorder_ && recorder_->isRecording()) {
     ULOGW("Recording already active");
+    lastRecordingError_ = "Recording already active";
     return false;
   }
+  ULOGI("startRecording: path=%s container=%d audio=%dHz/%dch/%dbit stream=%dx%d@%d fmt=%d",
+        path ? path : "(null)", (int)container,
+        audioSampleRate, audioChannels, audioBitsPerSample,
+        width_, height_, fps_, (int)uvcFrameFormat_);
   recorder_ = std::make_unique<uvc::RawRecorder>();
   uvc::VideoSourceFormat srcFmt;
   switch (uvcFrameFormat_) {
@@ -304,7 +407,14 @@ bool UsbVideoStreamer::startRecording(const char* path, uvc::ContainerFormat con
   }
   int ret = recorder_->start(path, width_, height_, fps_, srcFmt, container,
                            audioSampleRate, audioChannels, audioBitsPerSample);
-  return ret == 0;
+  if (ret != 0) {
+    lastRecordingError_ = recorder_->getLastError();
+    ULOGE("startRecording failed: ret=%d err=%s", ret, lastRecordingError_.c_str());
+    recorder_.reset();
+    return false;
+  }
+  ULOGI("startRecording success");
+  return true;
 }
 
 void UsbVideoStreamer::stopRecording() {
@@ -321,6 +431,29 @@ bool UsbVideoStreamer::isRecording() const {
 void UsbVideoStreamer::writeAudioToRecorder(const uint8_t* data, size_t len) {
   if (recorder_ && recorder_->isRecording()) {
     recorder_->writeAudio(data, len, -1);
+  }
+}
+
+void UsbVideoStreamer::getRecordingStats(int64_t* videoFrames, int64_t* audioSamples, int64_t* dropped, int64_t* fileSize) const {
+  if (recorder_ && recorder_->isRecording()) {
+    *videoFrames = recorder_->getVideoFramesWritten();
+    *audioSamples = recorder_->getAudioSamplesWritten();
+    *dropped = recorder_->getDroppedVideoCount();
+    // Get file size from output path
+    std::string path = recorder_->getOutputPath();
+    FILE* f = fopen(path.c_str(), "r");
+    if (f) {
+      fseek(f, 0, SEEK_END);
+      *fileSize = ftell(f);
+      fclose(f);
+    } else {
+      *fileSize = 0;
+    }
+  } else {
+    *videoFrames = 0;
+    *audioSamples = 0;
+    *dropped = 0;
+    *fileSize = 0;
   }
 }
 

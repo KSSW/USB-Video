@@ -16,6 +16,7 @@
 package com.meta.usbvideo
 
 import android.app.Application
+import com.meta.usbvideo.record.RawRecorder
 import com.meta.usbvideo.usb.UsbMonitor
 
 class UsbVideoApplication : Application() {
@@ -23,6 +24,7 @@ class UsbVideoApplication : Application() {
   override fun onCreate() {
     super.onCreate()
     UsbMonitor.init(this)
+    RawRecorder.initOutputSettings(this)
     System.loadLibrary("usbvideo")
   }
 }

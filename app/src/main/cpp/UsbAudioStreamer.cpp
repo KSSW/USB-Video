@@ -308,6 +308,7 @@ UsbAudioStreamer::UsbAudioStreamer(
         uint32_t samplingFrequency,
         uint8_t subFrameSize,
         uint8_t channelCount,
+        uint8_t outputChannelCount,
         uint32_t jAudioPerfMode,
         uint32_t framesPerBurst,
         int desiredInterfaceNumber,
@@ -316,6 +317,7 @@ UsbAudioStreamer::UsbAudioStreamer(
           samplingFrequency_(samplingFrequency),
           subFrameSize_(subFrameSize),
           channelCount_(channelCount),
+          outputChannelCount_(outputChannelCount),
           framesPerBurst_(framesPerBurst),
           desiredInterfaceNumber_(desiredInterfaceNumber),
           desiredAltSetting_(desiredAltSetting) {
@@ -363,7 +365,8 @@ UsbAudioStreamer::UsbAudioStreamer(
     AAudioStreamBuilder_setDirection(audioStreamBuilder_, AAUDIO_DIRECTION_OUTPUT);
     AAudioStreamBuilder_setFormat(audioStreamBuilder_, convertFormat(jAudioFormat_));
     AAudioStreamBuilder_setSampleRate(audioStreamBuilder_, samplingFrequency);
-    AAudioStreamBuilder_setChannelCount(audioStreamBuilder_, channelCount);
+    // Use outputChannelCount for AAudio stream (downmix from multi-channel to stereo)
+    AAudioStreamBuilder_setChannelCount(audioStreamBuilder_, outputChannelCount_);
     AAudioStreamBuilder_setPerformanceMode(audioStreamBuilder_, convertPerfMode(jAudioPerfMode));
     AAudioStreamBuilder_setDataCallback(audioStreamBuilder_, audioPlaybackCallback, this);
     result = AAudioStreamBuilder_openStream(audioStreamBuilder_, &audioStream_);
@@ -592,13 +595,67 @@ aaudio_data_callback_result_t UsbAudioStreamer::audioPlaybackCallback(
   if (available < sizeToRead) {
     memset(audioData, 0, bytesToRead);
   } else {
-    auto movedData = streamer->ringBuffer_->read((uint16_t*)audioData, sizeToRead);
-    if (movedData != sizeToRead && streamer->state_ == StreamerState::STARTED) {
-      ULOGD(
-              "ringBuffer read error %zu sizeToRead %d read data = %d",
-              available,
-              sizeToRead,
-              movedData);
+    // Check if downmixing is needed (multi-channel input, stereo output)
+    bool needDownmix = (streamer->channelCount_ != streamer->outputChannelCount_);
+    
+    if (needDownmix) {
+      // Read multi-channel data into temporary buffer
+      std::vector<uint16_t> tempBuffer(sizeToRead);
+      auto movedData = streamer->ringBuffer_->read(tempBuffer.data(), sizeToRead);
+      if (movedData != sizeToRead && streamer->state_ == StreamerState::STARTED) {
+        ULOGD(
+                "ringBuffer read error %zu sizeToRead %d read data = %d",
+                available,
+                sizeToRead,
+                movedData);
+      }
+      
+      // Downmix from multi-channel to stereo
+      // For U4 4K60: only FL and FR have data, other channels are silent
+      // Simply extract FL and FR without mixing
+      uint16_t* output = (uint16_t*)audioData;
+      int outputChannels = streamer->outputChannelCount_;
+      int inputChannels = streamer->channelCount_;
+      
+      for (int frame = 0; frame < numFrames; frame++) {
+        if (inputChannels == 6 && outputChannels == 2) {
+          // 5.1 layout: FL, FR, C, LFE, BL, BR
+          // Only FL and FR have data, extract them directly
+          int fl = frame * inputChannels + 0;  // Front Left
+          int fr = frame * inputChannels + 1;  // Front Right
+          
+          output[frame * outputChannels + 0] = tempBuffer[fl];
+          output[frame * outputChannels + 1] = tempBuffer[fr];
+        } else if (inputChannels == 8 && outputChannels == 2) {
+          // 7.1 layout: FL, FR, C, LFE, BL, BR, SL, SR
+          // Only FL and FR have data, extract them directly
+          int fl = frame * inputChannels + 0;  // Front Left
+          int fr = frame * inputChannels + 1;  // Front Right
+          
+          output[frame * outputChannels + 0] = tempBuffer[fl];
+          output[frame * outputChannels + 1] = tempBuffer[fr];
+        } else {
+          // Fallback: simple average for other channel configurations
+          for (int ch = 0; ch < outputChannels; ch++) {
+            int32_t sum = 0;
+            for (int inCh = 0; inCh < inputChannels; inCh++) {
+              int sampleIndex = frame * inputChannels + inCh;
+              sum += tempBuffer[sampleIndex];
+            }
+            output[frame * outputChannels + ch] = (uint16_t)(sum / inputChannels);
+          }
+        }
+      }
+    } else {
+      // No downmix needed, read directly
+      auto movedData = streamer->ringBuffer_->read((uint16_t*)audioData, sizeToRead);
+      if (movedData != sizeToRead && streamer->state_ == StreamerState::STARTED) {
+        ULOGD(
+                "ringBuffer read error %zu sizeToRead %d read data = %d",
+                available,
+                sizeToRead,
+                movedData);
+      }
     }
   }
 
@@ -766,7 +823,61 @@ void UsbAudioStreamer::transferCallback(libusb_transfer* transfer) {
         if (recordCbCount <= 20 || recordCbCount % 1000 == 0) {
           ULOGI("Audio record callback: count=%d len=%d", recordCbCount, pack->actual_length);
         }
-        streamer->audioRecordCallback_(data, pack->actual_length);
+        
+        // Check if downmixing is needed for recording (multi-channel input, stereo output)
+        bool needDownmix = (streamer->channelCount_ != streamer->outputChannelCount_);
+        
+        if (needDownmix) {
+          // Downmix from multi-channel to stereo for recording
+          // For U4 4K60: only FL and FR have data, other channels are silent
+          // Simply extract FL and FR without mixing
+          int inputChannels = streamer->channelCount_;
+          int outputChannels = streamer->outputChannelCount_;
+          int sampleCount = pack->actual_length / streamer->subFrameSize_;
+          int frameCount = sampleCount / inputChannels;
+          
+          // Allocate output buffer for stereo
+          std::vector<uint8_t> outputData(frameCount * outputChannels * streamer->subFrameSize_);
+          uint16_t* inputSamples = (uint16_t*)data;
+          uint16_t* outputSamples = (uint16_t*)outputData.data();
+          
+          // Extract FL and FR directly
+          for (int frame = 0; frame < frameCount; frame++) {
+            if (inputChannels == 6 && outputChannels == 2) {
+              // 5.1 layout: FL, FR, C, LFE, BL, BR
+              // Only FL and FR have data, extract them directly
+              int fl = frame * inputChannels + 0;  // Front Left
+              int fr = frame * inputChannels + 1;  // Front Right
+              
+              outputSamples[frame * outputChannels + 0] = inputSamples[fl];
+              outputSamples[frame * outputChannels + 1] = inputSamples[fr];
+            } else if (inputChannels == 8 && outputChannels == 2) {
+              // 7.1 layout: FL, FR, C, LFE, BL, BR, SL, SR
+              // Only FL and FR have data, extract them directly
+              int fl = frame * inputChannels + 0;  // Front Left
+              int fr = frame * inputChannels + 1;  // Front Right
+              
+              outputSamples[frame * outputChannels + 0] = inputSamples[fl];
+              outputSamples[frame * outputChannels + 1] = inputSamples[fr];
+            } else {
+              // Fallback: simple average for other channel configurations
+              for (int ch = 0; ch < outputChannels; ch++) {
+                int32_t sum = 0;
+                for (int inCh = 0; inCh < inputChannels; inCh++) {
+                  int sampleIndex = frame * inputChannels + inCh;
+                  sum += inputSamples[sampleIndex];
+                }
+                outputSamples[frame * outputChannels + ch] = (uint16_t)(sum / inputChannels);
+              }
+            }
+          }
+          
+          // Pass downmixed stereo data to recorder
+          streamer->audioRecordCallback_(outputData.data(), outputData.size());
+        } else {
+          // No downmix needed, pass original data
+          streamer->audioRecordCallback_(data, pack->actual_length);
+        }
       }
     }
 

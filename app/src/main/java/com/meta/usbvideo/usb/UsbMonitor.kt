@@ -42,6 +42,9 @@ object UsbMonitor {
 
   /** Desired audio channel count from user settings (2=stereo, 6=5.1, 8=7.1) */
   @Volatile var desiredAudioChannelCount: Int = 2
+  
+  /** Force stereo mode for specific devices (e.g., U4 4K60) */
+  @Volatile var forceStereoMode: Boolean = false
 
   private lateinit var application: Application
   private lateinit var usbDeviceStateInternal: MutableStateFlow<UsbDeviceState>
@@ -104,6 +107,18 @@ object UsbMonitor {
     FileLogger.log(TAG, "======== USB Descriptor Hex (${usbConnectionForAudio.rawDescriptors.size} bytes) ========")
     hexDump.chunked(128).forEach { FileLogger.log(TAG, it) }
 
+    // Detect U4 4K60 device for stereo mode enforcement (at playback/recording level, not USB level)
+    val deviceName = usbDevice.productName ?: ""
+    if (deviceName.contains("U4 4K60", ignoreCase = true)) {
+      forceStereoMode = true
+      Log.i(TAG, "U4 4K60 detected: stereo mode will be enforced at playback level")
+      FileLogger.log(TAG, "U4 4K60 detected: stereo mode will be enforced at playback level")
+    } else {
+      forceStereoMode = false
+    }
+
+    // Use original desired channel count for USB alternate setting selection
+    // This allows selecting 6ch alternate setting even if output will be downmixed to 2ch
     val audioStreamingConnection = AudioStreamingConnection(
         usbDevice, usbConnectionForAudio, desiredAudioChannelCount
     )

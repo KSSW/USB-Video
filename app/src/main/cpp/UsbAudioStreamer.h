@@ -97,6 +97,7 @@ class UsbAudioStreamer final {
       uint32_t samplingFrequency,
       uint8_t subFrameSize, // number of bytes per audio sample
       uint8_t channelCount,
+      uint8_t outputChannelCount, // Output channel count (for downmix)
       uint32_t jAudioPerfMode,
       uint32_t framesPerBurst,
       int desiredInterfaceNumber = -1,  // USB interface number from Kotlin descriptor parsing
@@ -129,7 +130,7 @@ class UsbAudioStreamer final {
   uint32_t bytesInAudioFrames(int32_t numFrames) const {
     // AAudio buffer size depends on playback format, not USB subFrameSize
     int bytesPerSample = (jAudioFormat_ == 4) ? 4 : 2;
-    return numFrames * channelCount_ * bytesPerSample;
+    return numFrames * outputChannelCount_ * bytesPerSample;
   }
 
   bool hasActiveTransfers() const {
@@ -158,6 +159,7 @@ class UsbAudioStreamer final {
   float getAudioLevelRight() const { return audioLevels_[1]; }
   const float* getAudioLevels() const { return audioLevels_; }
   uint8_t getChannelCount() const { return channelCount_; }
+  uint8_t getOutputChannelCount() const { return outputChannelCount_; }
   const std::string& getCtrlDiagLog() const { return ctrlDiagLog_; }
   const std::string& getRawPktHexDump() const { return rawPktHexDump_; }
   void setInitialMuteMs(int ms) { initialMuteMs_ = ms; }
@@ -175,6 +177,7 @@ class UsbAudioStreamer final {
   uint32_t samplingFrequency_{};
   uint8_t subFrameSize_{};
   uint8_t channelCount_{};
+  uint8_t outputChannelCount_; // Output channel count (for downmix from multi-channel)
   int32_t framesPerBurst_{};
   int desiredInterfaceNumber_{-1};
   int desiredAltSetting_{-1};

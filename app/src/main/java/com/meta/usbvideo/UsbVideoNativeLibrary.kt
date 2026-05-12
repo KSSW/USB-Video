@@ -25,6 +25,7 @@ import com.meta.usbvideo.usb.AudioStreamingConnection
 import com.meta.usbvideo.usb.AudioStreamingFormatTypeDescriptor
 import com.meta.usbvideo.usb.VideoFormat
 import com.meta.usbvideo.usb.VideoStreamingConnection
+import com.meta.usbvideo.usb.UsbMonitor
 
 enum class UsbSpeed {
   Unknown,
@@ -75,15 +76,19 @@ object UsbVideoNativeLibrary {
     val desiredAltSetting = if (audioStreamingConnection.hasInterfaceDescriptor)
         audioStreamingConnection.interfaceDescriptor.bAlternateSetting else -1
 
+    // Force stereo output for U4 4K60 device (downmix from multi-channel)
+    val outputChannelCount = if (UsbMonitor.forceStereoMode) 2 else channelCount
+
     Log.i("UsbVideoNativeLibrary", "connectUsbAudioStreaming: ch=$channelCount, " +
-        "rate=$samplingFrequency, subFrame=$subFrameSize, iface=$desiredIfaceNum, alt=$desiredAltSetting")
+        "outputCh=$outputChannelCount, rate=$samplingFrequency, subFrame=$subFrameSize, iface=$desiredIfaceNum, alt=$desiredAltSetting")
 
     return if (connectUsbAudioStreamingNative(
         deviceFD,
         audioFormat,
         samplingFrequency,
         subFrameSize,
-        channelCount,
+        channelCount,  // USB input channel count (may be 6ch)
+        outputChannelCount,  // Output channel count (forced to 2 for U4 4K60)
         AudioTrack.PERFORMANCE_MODE_LOW_LATENCY,
         outputFramesPerBuffer,
         desiredIfaceNum,
@@ -102,6 +107,7 @@ object UsbVideoNativeLibrary {
       samplingFrequency: Int,
       subFrameSize: Int,
       channelCount: Int,
+      outputChannelCount: Int,
       jAudioPerfMode: Int,
       outputFramesPerBuffer: Int,
       desiredInterfaceNumber: Int,
@@ -178,6 +184,7 @@ object UsbVideoNativeLibrary {
   external fun streamingStatsSummaryString(): String
   external fun getAudioDiagnostics(): String
   external fun getUvcXuDiagnostics(): String
+  external fun getHdmiInfoFrameDiagnostics(): String
   external fun getNativeVideoFps(): Int
 
   fun startRecording(
@@ -200,4 +207,12 @@ object UsbVideoNativeLibrary {
 
   external fun stopRecordingNative()
   external fun isRecordingNative(): Boolean
+  external fun getLastErrorNative(): String
+
+  /** Get recording stats: [videoFramesWritten, audioSamplesWritten, droppedVideoCount, recordingFileSizeBytes] */
+  external fun getRecordingStatsNative(): LongArray
+
+  // Native logging interface to FileLogger
+  external fun nativeLogToJava(tag: String, message: String): Boolean
+  external fun setRecorderLogger()
 }

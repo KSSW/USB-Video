@@ -28,6 +28,7 @@ static JavaVM* javaVM_ = nullptr;
 
 static std::unique_ptr<UsbAudioStreamer> streamer_{};
 static std::unique_ptr<UsbVideoStreamer> uvcStreamer_{};
+static std::string lastRecordingError_{};
 
 using ANativeWindowOwner = std::unique_ptr<ANativeWindow, decltype(&ANativeWindow_release)>;
 static ANativeWindowOwner previewWindow_ = ANativeWindowOwner(nullptr, &ANativeWindow_release);
@@ -165,6 +166,16 @@ JNIEXPORT jstring JNICALL Java_com_meta_usbvideo_UsbVideoNativeLibrary_getUvcXuD
   return env->NewStringUTF(result.c_str());
 }
 
+JNIEXPORT jstring JNICALL Java_com_meta_usbvideo_UsbVideoNativeLibrary_getHdmiInfoFrameDiagnostics(
+    JNIEnv* env,
+    jobject self) {
+  std::string result = "";
+  if (uvcStreamer_ != nullptr) {
+    result = uvcStreamer_->getHdmiInfoFrameLog();
+  }
+  return env->NewStringUTF(result.c_str());
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_meta_usbvideo_UsbVideoNativeLibrary_startRecordingNative(
     JNIEnv* env,
@@ -174,11 +185,18 @@ Java_com_meta_usbvideo_UsbVideoNativeLibrary_startRecordingNative(
     jint audioSampleRate,
     jint audioChannels,
     jint audioBitsPerSample) {
+  lastRecordingError_.clear();
   if (uvcStreamer_ == nullptr) {
+    lastRecordingError_ = "USB video streamer is null (video stream not connected)";
+    CLOGE("startRecordingNative failed: %s", lastRecordingError_.c_str());
     return JNI_FALSE;
   }
   const char* c_path = env->GetStringUTFChars(path, nullptr);
-  if (!c_path) return JNI_FALSE;
+  if (!c_path) {
+    lastRecordingError_ = "Failed to read output path";
+    CLOGE("startRecordingNative failed: %s", lastRecordingError_.c_str());
+    return JNI_FALSE;
+  }
   uvc::ContainerFormat container;
   switch (containerFormat) {
     case 0: container = uvc::ContainerFormat::AVI; break;
@@ -187,8 +205,19 @@ Java_com_meta_usbvideo_UsbVideoNativeLibrary_startRecordingNative(
     case 3: container = uvc::ContainerFormat::MKV; break;
     default: container = uvc::ContainerFormat::AUTO; break;
   }
+  CLOGI("startRecordingNative: path=%s container=%d audio=%dHz/%dch/%dbit",
+        c_path, (int)container, audioSampleRate, audioChannels, audioBitsPerSample);
   bool ret = uvcStreamer_->startRecording(c_path, container,
                                           audioSampleRate, audioChannels, audioBitsPerSample);
+  if (!ret) {
+    lastRecordingError_ = uvcStreamer_->getLastRecordingError();
+    if (lastRecordingError_.empty()) {
+      lastRecordingError_ = "Native startRecording returned false";
+    }
+    CLOGE("startRecordingNative failed: %s", lastRecordingError_.c_str());
+  } else {
+    CLOGI("startRecordingNative success");
+  }
   env->ReleaseStringUTFChars(path, c_path);
 
   // Bridge audio data from UsbAudioStreamer to the recorder
@@ -201,6 +230,11 @@ Java_com_meta_usbvideo_UsbVideoNativeLibrary_startRecordingNative(
   }
 
   return ret ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_meta_usbvideo_UsbVideoNativeLibrary_getLastErrorNative(JNIEnv* env, jobject self) {
+  return env->NewStringUTF(lastRecordingError_.empty() ? "" : lastRecordingError_.c_str());
 }
 
 JNIEXPORT void JNICALL
@@ -231,6 +265,7 @@ Java_com_meta_usbvideo_UsbVideoNativeLibrary_connectUsbAudioStreamingNative(
     jint samplingFrequency,
     jint subFrameSize,
     jint channelCount,
+    jint outputChannelCount,
     jint jAudioPerfMode,
     jint outputFramesPerBuffer,
     jint desiredInterfaceNumber,
@@ -246,6 +281,7 @@ Java_com_meta_usbvideo_UsbVideoNativeLibrary_connectUsbAudioStreamingNative(
       samplingFrequency,
       subFrameSize,
       channelCount,
+      outputChannelCount,
       jAudioPerfMode,
       outputFramesPerBuffer,
       desiredInterfaceNumber,
@@ -308,6 +344,49 @@ Java_com_meta_usbvideo_UsbVideoNativeLibrary_getNativeVideoFps(JNIEnv* env, jobj
     return uvcStreamer_->getFps();
   }
   return 0;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_meta_usbvideo_UsbVideoNativeLibrary_nativeLogToJava(
+    JNIEnv* env,
+    jobject self,
+    jstring tag,
+    jstring message) {
+  if (!tag || !message) {
+    return JNI_FALSE;
+  }
+  const char* tagStr = env->GetStringUTFChars(tag, nullptr);
+  const char* msgStr = env->GetStringUTFChars(message, nullptr);
+  
+  // Call FileLogger via reflection
+  jclass fileLoggerClass = env->FindClass("com/meta/usbvideo/util/FileLogger");
+  if (fileLoggerClass) {
+    jmethodID logMethod = env->GetStaticMethodID(fileLoggerClass, "log", "(Ljava/lang/String;Ljava/lang/String;)V");
+    if (logMethod) {
+      env->CallStaticVoidMethod(fileLoggerClass, logMethod, tag, message);
+    }
+    env->DeleteLocalRef(fileLoggerClass);
+  }
+  
+  env->ReleaseStringUTFChars(tag, tagStr);
+  env->ReleaseStringUTFChars(message, msgStr);
+  return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_meta_usbvideo_UsbVideoNativeLibrary_setRecorderLogger(JNIEnv* env, jobject self) {
+  // JNI logging bridge disabled - RawRecorder logs to logcat only
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_com_meta_usbvideo_UsbVideoNativeLibrary_getRecordingStatsNative(JNIEnv* env, jobject self) {
+  jlongArray result = env->NewLongArray(4);
+  jlong stats[4] = {0, 0, 0, 0};
+  if (uvcStreamer_ != nullptr) {
+    uvcStreamer_->getRecordingStats(&stats[0], &stats[1], &stats[2], &stats[3]);
+  }
+  env->SetLongArrayRegion(result, 0, 4, stats);
+  return result;
 }
 
 } // extern "C"

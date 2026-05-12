@@ -5,7 +5,6 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
-import android.os.Environment
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
@@ -48,24 +47,15 @@ class RawMuxer {
     }
 
     fun getVideoOutputDir(): File {
-        val base = File(Environment.getExternalStorageDirectory(), "USB Video")
-        val dir = File(base, "Video")
-        if (!dir.exists()) dir.mkdirs()
-        return dir
+        return RawRecorder.getVideoOutputDir()
     }
 
     fun getAudioOutputDir(): File {
-        val base = File(Environment.getExternalStorageDirectory(), "USB Video")
-        val dir = File(base, "Audio")
-        if (!dir.exists()) dir.mkdirs()
-        return dir
+        return RawRecorder.getAudioOutputDir()
     }
 
     fun getPicturesOutputDir(): File {
-        val base = File(Environment.getExternalStorageDirectory(), "USB Video")
-        val dir = File(base, "Pictures")
-        if (!dir.exists()) dir.mkdirs()
-        return dir
+        return RawRecorder.getPicturesOutputDir()
     }
 
     fun startRecording(width: Int, height: Int, fps: Int, bitRate: Int = 8_000_000) {

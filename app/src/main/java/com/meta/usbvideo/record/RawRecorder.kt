@@ -1,5 +1,7 @@
 package com.meta.usbvideo.record
 
+import android.content.Context
+import android.os.Environment
 import android.util.Log
 import java.io.File
 
@@ -74,25 +76,72 @@ class RawRecorder {
     }
 
     companion object {
-        fun getVideoOutputDir(): File {
-            val base = android.os.Environment.getExternalStorageDirectory()
-            val dir = File(base, "USB Video/Video")
-            if (!dir.exists()) dir.mkdirs()
+        private const val PREFS_NAME = "save_files_settings"
+        private const val KEY_CUSTOM_OUTPUT_BASE_DIR = "custom_output_base_dir"
+
+        @Volatile
+        private var customOutputBaseDir: File? = null
+
+        fun initOutputSettings(context: Context) {
+            val savedPath = context.applicationContext
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_CUSTOM_OUTPUT_BASE_DIR, null)
+            customOutputBaseDir = savedPath
+                ?.takeIf { it.isNotBlank() }
+                ?.let { File(it) }
+            ensureDefaultOutputDirs()
+        }
+
+        fun setCustomOutputBaseDir(context: Context, path: String?) {
+            val cleanPath = path?.trim()?.takeIf { it.isNotEmpty() }
+            customOutputBaseDir = cleanPath?.let { File(it) }
+            context.applicationContext
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_CUSTOM_OUTPUT_BASE_DIR, cleanPath)
+                .apply()
+            ensureDefaultOutputDirs()
+            Log.i(TAG, "Custom output base dir set to: ${getOutputBaseDir().absolutePath}")
+        }
+
+        fun getOutputBaseDir(): File {
+            return customOutputBaseDir ?: File(Environment.getExternalStorageDirectory(), "USB Video")
+        }
+
+        fun getOutputBasePath(): String {
+            return getOutputBaseDir().absolutePath
+        }
+
+        private fun ensureDefaultOutputDirs() {
+            ensureWritableDir(File(getOutputBaseDir(), "Video"))
+            ensureWritableDir(File(getOutputBaseDir(), "Audio"))
+            ensureWritableDir(File(getOutputBaseDir(), "Pictures"))
+        }
+
+        private fun ensureWritableDir(dir: File): File {
+            if (!dir.exists()) {
+                val ok = dir.mkdirs()
+                Log.i(TAG, "mkdirs ${dir.absolutePath}: $ok")
+            }
+            // Best effort: on Android shared storage this is controlled by the
+            // platform/All files access, but keep the directory as permissive as
+            // the filesystem allows for native FFmpeg direct-path writes.
+            dir.setReadable(true, false)
+            dir.setWritable(true, false)
+            dir.setExecutable(true, false)
             return dir
+        }
+
+        fun getVideoOutputDir(): File {
+            return ensureWritableDir(File(getOutputBaseDir(), "Video"))
         }
 
         fun getAudioOutputDir(): File {
-            val base = android.os.Environment.getExternalStorageDirectory()
-            val dir = File(base, "USB Video/Audio")
-            if (!dir.exists()) dir.mkdirs()
-            return dir
+            return ensureWritableDir(File(getOutputBaseDir(), "Audio"))
         }
 
         fun getPicturesOutputDir(): File {
-            val base = android.os.Environment.getExternalStorageDirectory()
-            val dir = File(base, "USB Video/Pictures")
-            if (!dir.exists()) dir.mkdirs()
-            return dir
+            return ensureWritableDir(File(getOutputBaseDir(), "Pictures"))
         }
 
         @JvmStatic

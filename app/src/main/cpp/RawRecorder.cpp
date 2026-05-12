@@ -12,15 +12,22 @@
 #include <cstring>
 #include <ctime>
 #include <vector>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavutil/dict.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
 #include <libavutil/time.h>
+#include <jni.h>
+#include <pthread.h>
 }
+
+using namespace uvc;
 
 #define LOG_TAG "RawRecorder"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -39,9 +46,9 @@ RawRecorder::RawRecorder() {
 
 RawRecorder::~RawRecorder() {
     stop();
-    pthread_cond_destroy(&queueCond);
-    pthread_mutex_destroy(&queueMutex);
     pthread_mutex_destroy(&mutex);
+    pthread_mutex_destroy(&queueMutex);
+    pthread_cond_destroy(&queueCond);
 }
 
 bool RawRecorder::isRecording() const {
@@ -62,7 +69,12 @@ ContainerFormat RawRecorder::autoSelectContainer() const {
         case VideoSourceFormat::MJPEG:
             return ContainerFormat::MOV;
         default:
-            return ContainerFormat::AVI;
+            // Use MKV for raw/uncompressed formats.
+            // MKV supports variable-frame-rate via PTS, which allows
+            // wall-clock based A/V sync without audio trimming.
+            // This keeps the audio waveform intact for external sync
+            // (e.g., matching with OBS 7.1ch recording in DaVinci).
+            return ContainerFormat::MKV;
     }
 }
 
@@ -86,6 +98,157 @@ static size_t expected_video_frame_bytes(VideoSourceFormat fmt, int width, int h
         default:
             return 0;
     }
+}
+
+static void put_le32(uint8_t *p, int32_t v) {
+    uint32_t u = static_cast<uint32_t>(v);
+    p[0] = static_cast<uint8_t>(u & 0xff);
+    p[1] = static_cast<uint8_t>((u >> 8) & 0xff);
+    p[2] = static_cast<uint8_t>((u >> 16) & 0xff);
+    p[3] = static_cast<uint8_t>((u >> 24) & 0xff);
+}
+
+static int ebml_vint_length(uint8_t first) {
+    for (int len = 1; len <= 8; ++len) {
+        if (first & (0x80 >> (len - 1))) {
+            return len;
+        }
+    }
+    return 0;
+}
+
+static uint64_t ebml_vint_value(const uint8_t *p, int len) {
+    uint64_t value = static_cast<uint64_t>(p[0] & (0xff >> len));
+    for (int i = 1; i < len; ++i) {
+        value = (value << 8) | p[i];
+    }
+    return value;
+}
+
+static void ebml_write_vint_value(uint8_t *p, int len, uint64_t value) {
+    for (int i = len - 1; i >= 0; --i) {
+        p[i] = static_cast<uint8_t>(value & 0xff);
+        value >>= 8;
+    }
+    p[0] |= static_cast<uint8_t>(0x80 >> (len - 1));
+}
+
+static void patch_mkv_segment_size(const std::string &path) {
+    if (path.empty()) return;
+    int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        LOGW("patch_mkv_segment_size: open failed for %s", path.c_str());
+        return;
+    }
+
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
+        LOGW("patch_mkv_segment_size: fstat failed");
+        ::close(fd);
+        return;
+    }
+
+    uint8_t header[4096];
+    ssize_t n = ::pread(fd, header, sizeof(header), 0);
+    if (n <= 0) {
+        LOGW("patch_mkv_segment_size: pread failed");
+        ::close(fd);
+        return;
+    }
+
+    int seg = -1;
+    for (int i = 0; i + 4 < n; ++i) {
+        if (header[i] == 0x18 && header[i + 1] == 0x53
+            && header[i + 2] == 0x80 && header[i + 3] == 0x67) {
+            seg = i;
+            break;
+        }
+    }
+    if (seg < 0 || seg + 5 >= n) {
+        LOGW("patch_mkv_segment_size: Segment element not found");
+        ::close(fd);
+        return;
+    }
+
+    const int sizeOffset = seg + 4;
+    const int vintLen = ebml_vint_length(header[sizeOffset]);
+    if (vintLen <= 0 || sizeOffset + vintLen > n) {
+        LOGW("patch_mkv_segment_size: invalid Segment size VINT");
+        ::close(fd);
+        return;
+    }
+
+    const int64_t segmentDataOffset = sizeOffset + vintLen;
+    const uint64_t actualSize = static_cast<uint64_t>(st.st_size - segmentDataOffset);
+    const uint64_t oldSize = ebml_vint_value(header + sizeOffset, vintLen);
+    const uint64_t maxSize = (vintLen == 8) ? ((1ULL << 56) - 2) : ((1ULL << (7 * vintLen)) - 2);
+    if (actualSize > maxSize) {
+        LOGW("patch_mkv_segment_size: file too large for existing VINT len=%d", vintLen);
+        ::close(fd);
+        return;
+    }
+
+    if (oldSize != actualSize) {
+        uint8_t out[8] = {};
+        ebml_write_vint_value(out, vintLen, actualSize);
+        if (::pwrite(fd, out, vintLen, sizeOffset) != vintLen) {
+            LOGW("patch_mkv_segment_size: pwrite failed");
+        } else {
+            LOGI("patch_mkv_segment_size: %llu -> %llu at offset 0x%x",
+                 (unsigned long long)oldSize, (unsigned long long)actualSize, sizeOffset);
+        }
+    } else {
+        LOGI("patch_mkv_segment_size: already correct (%llu)", (unsigned long long)actualSize);
+    }
+    ::close(fd);
+}
+
+static bool patch_mkv_vfw_height_positive(const std::string &path, int width, int height) {
+    if (path.empty() || width <= 0 || height <= 0) return false;
+    int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        LOGW("patch_mkv_vfw_height_positive: open failed for %s", path.c_str());
+        return false;
+    }
+
+    constexpr size_t kScanBytes = 64 * 1024;
+    std::vector<uint8_t> buf(kScanBytes);
+    ssize_t n = ::pread(fd, buf.data(), buf.size(), 0);
+    if (n <= 0) {
+        LOGW("patch_mkv_vfw_height_positive: pread failed");
+        ::close(fd);
+        return false;
+    }
+
+    uint8_t wle[4], negHle[4], posHle[4];
+    put_le32(wle, width);
+    put_le32(negHle, -height);
+    put_le32(posHle, height);
+
+    for (ssize_t i = 0; i + 16 <= n; ++i) {
+        // BITMAPINFOHEADER:
+        //   biSize=40, biWidth, biHeight, biPlanes=1, biBitCount=24
+        if (buf[i] == 0x28 && buf[i + 1] == 0x00 && buf[i + 2] == 0x00 && buf[i + 3] == 0x00
+            && memcmp(buf.data() + i + 4, wle, 4) == 0
+            && memcmp(buf.data() + i + 8, negHle, 4) == 0
+            && buf[i + 12] == 0x01 && buf[i + 13] == 0x00
+            && buf[i + 14] == 0x18 && buf[i + 15] == 0x00) {
+            const off_t heightOffset = static_cast<off_t>(i + 8);
+            if (::pwrite(fd, posHle, 4, heightOffset) == 4) {
+                LOGI("patch_mkv_vfw_height_positive: patched VfW height -%d -> +%d at offset 0x%llx",
+                     height, height, (long long)heightOffset);
+                ::close(fd);
+                return true;
+            }
+            LOGW("patch_mkv_vfw_height_positive: pwrite failed");
+            ::close(fd);
+            return false;
+        }
+    }
+
+    LOGW("patch_mkv_vfw_height_positive: BITMAPINFOHEADER not found");
+    ::close(fd);
+    return false;
 }
 
 const char *RawRecorder::containerToExtension(ContainerFormat fmt) const {
@@ -124,9 +287,15 @@ void RawRecorder::writerLoop() {
     videoFramesWritten = 0;
     lastSyncLogTimeMs = getCurrentTimeMs();
 
-    // Raw PCM byte accumulator — audio is paced against video so it
-    // never exceeds video duration.  One merged chunk is written per
-    // video frame, giving clean frame-aligned interleaving in the AVI.
+    // Raw PCM byte accumulator (FIFO).
+    //
+    // A/V SYNC STRATEGY (MKV + wall-clock PTS):
+    // Both video and audio use wall-clock-derived PTS.  Audio is written
+    // in full without any pacing or trimming, preserving the exact waveform
+    // so it can be matched with external recordings (e.g., OBS 7.1ch).
+    // MKV container honours per-packet PTS for playback timing, so even if
+    // the actual video delivery rate differs from the nominal fps, the A/V
+    // sync stays correct.
     std::vector<uint8_t> audioAccum;
     const int bpf = audioChannels * (audioBitsPerSample / 8);  // bytes per sample-frame
 
@@ -158,18 +327,10 @@ void RawRecorder::writerLoop() {
                 }
             }
 
-            // 2) Target = exact sample count matching video duration
-            int64_t target = (audioSampleRate > 0 && fpsNum > 0)
-                ? (videoFramesWritten * (int64_t)audioSampleRate * fpsDen / fpsNum) : 0;
-            int64_t need = target - audioSamplesWritten;
-            if (need < 0) need = 0;
-
-            // 3) Write available audio up to target (one chunk)
-            if (need > 0 && bpf > 0) {
-                int64_t wantBytes = need * bpf;
+            // 2) Write ALL remaining audio (no trimming — preserve waveform)
+            if (bpf > 0 && !audioAccum.empty()) {
                 int64_t haveBytes = (int64_t)audioAccum.size();
-                int64_t wb = std::min(wantBytes, haveBytes);
-                wb = (wb / bpf) * bpf;
+                int64_t wb = (haveBytes / bpf) * bpf;
                 int64_t ws = wb / bpf;
                 if (wb > 0) {
                     AVPacket *pkt = av_packet_alloc();
@@ -185,32 +346,15 @@ void RawRecorder::writerLoop() {
                 }
             }
 
-            // 4) Pad silence if audio still shorter than video
-            int64_t pad = target - audioSamplesWritten;
-            if (pad > 0 && bpf > 0) {
-                AVPacket *pp = av_packet_alloc();
-                if (pp && av_new_packet(pp, (int)(pad * bpf)) == 0) {
-                    memset(pp->data, 0, pp->size);
-                    pp->pts = audioSamplesWritten; pp->dts = pp->pts;
-                    pp->duration = pad;
-                    pp->stream_index = audioStream ? audioStream->index : 1;
-                    pp->flags |= AV_PKT_FLAG_KEY;
-                    if (writeAudioPacket(pp) == 0) { audioWrittenTotal++; audioSamplesWritten += pad; }
-                    av_packet_free(&pp);
-                } else if (pp) { av_packet_free(&pp); }
-                LOGI("SYNC-PAD: %lld silent samples", (long long)pad);
-            }
-
             audioAccum.clear();
             int64_t wallMs  = getCurrentTimeMs() - recordStartTimeMs;
             int64_t videoMs = (fpsNum > 0) ? (videoFramesWritten * 1000LL * fpsDen / fpsNum) : 0;
             int64_t audioMs = (audioSampleRate > 0) ? (audioSamplesWritten * 1000LL / audioSampleRate) : 0;
             LOGI("SYNC-FINAL wall=%lldms video=%lldms audio=%lldms diff=%lldms "
-                 "frames=%lld samples=%lld target=%lld",
+                 "frames=%lld samples=%lld",
                  (long long)wallMs, (long long)videoMs, (long long)audioMs,
                  (long long)(videoMs - audioMs),
-                 (long long)videoFramesWritten, (long long)audioSamplesWritten,
-                 (long long)target);
+                 (long long)videoFramesWritten, (long long)audioSamplesWritten);
             break;
         }
 
@@ -235,30 +379,28 @@ void RawRecorder::writerLoop() {
             av_packet_free(&videoPkt);
         }
 
-        // ── Write one merged AUDIO chunk up to video target ──
+        // ── Write ALL available audio (no pacing, no trimming) ──
+        // Audio waveform is preserved exactly as captured, which is
+        // essential for waveform-based sync with external recordings
+        // (e.g., OBS 7.1ch audio).  MKV container uses PTS for timing,
+        // so A/V sync is maintained through wall-clock-derived timestamps
+        // rather than forced duration matching.
         if (bpf > 0 && !audioAccum.empty()) {
-            int64_t target = (audioSampleRate > 0 && fpsNum > 0)
-                ? (videoFramesWritten * (int64_t)audioSampleRate * fpsDen / fpsNum) : 0;
-            int64_t room = target - audioSamplesWritten;
-            if (room > 0) {
-                int64_t wantBytes = room * bpf;
-                int64_t haveBytes = (int64_t)audioAccum.size();
-                int64_t wb = std::min(wantBytes, haveBytes);
-                wb = (wb / bpf) * bpf;
-                int64_t ws = wb / bpf;
-                if (wb > 0) {
-                    AVPacket *pkt = av_packet_alloc();
-                    if (pkt && av_new_packet(pkt, (int)wb) == 0) {
-                        memcpy(pkt->data, audioAccum.data(), wb);
-                        pkt->pts = audioSamplesWritten; pkt->dts = pkt->pts;
-                        pkt->duration = ws;
-                        pkt->stream_index = audioStream ? audioStream->index : 1;
-                        pkt->flags |= AV_PKT_FLAG_KEY;
-                        if (writeAudioPacket(pkt) == 0) { audioWrittenTotal++; audioSamplesWritten += ws; }
-                        av_packet_free(&pkt);
-                    } else if (pkt) { av_packet_free(&pkt); }
-                    audioAccum.erase(audioAccum.begin(), audioAccum.begin() + (size_t)wb);
-                }
+            int64_t haveBytes = (int64_t)audioAccum.size();
+            int64_t wb = (haveBytes / bpf) * bpf;
+            int64_t ws = wb / bpf;
+            if (wb > 0) {
+                AVPacket *pkt = av_packet_alloc();
+                if (pkt && av_new_packet(pkt, (int)wb) == 0) {
+                    memcpy(pkt->data, audioAccum.data(), wb);
+                    pkt->pts = audioSamplesWritten; pkt->dts = pkt->pts;
+                    pkt->duration = ws;
+                    pkt->stream_index = audioStream ? audioStream->index : 1;
+                    pkt->flags |= AV_PKT_FLAG_KEY;
+                    if (writeAudioPacket(pkt) == 0) { audioWrittenTotal++; audioSamplesWritten += ws; }
+                    av_packet_free(&pkt);
+                } else if (pkt) { av_packet_free(&pkt); }
+                audioAccum.clear();
             }
         }
 
@@ -320,6 +462,8 @@ int RawRecorder::setupStream(int width, int height, int fps) {
     if (!fmtCtx) return -1;
     const bool isAviMuxer = (fmtCtx->oformat && fmtCtx->oformat->name
                              && strstr(fmtCtx->oformat->name, "avi") != nullptr);
+    const bool isMkvMuxer = (fmtCtx->oformat && fmtCtx->oformat->name
+                             && strstr(fmtCtx->oformat->name, "matroska") != nullptr);
 
     AVCodecID codecId = AV_CODEC_ID_NONE;
     switch (srcFormat) {
@@ -353,6 +497,9 @@ int RawRecorder::setupStream(int width, int height, int fps) {
     par->format = AV_PIX_FMT_NONE;
     par->sample_aspect_ratio = (AVRational){1, 1};
 
+    // MKV uses V_MS/VFW/FOURCC mode for rawvideo, which still requires
+    // a valid codec_tag (FourCC) embedded in the BITMAPINFOHEADER.
+    // So we set codec_tag for ALL muxers (AVI, MKV, MOV).
     if (srcFormat == VideoSourceFormat::MJPEG) {
         par->codec_tag = MKTAG('M', 'J', 'P', 'G');
     } else if (srcFormat == VideoSourceFormat::YUYV) {
@@ -378,8 +525,10 @@ int RawRecorder::setupStream(int width, int height, int fps) {
     } else if (srcFormat == VideoSourceFormat::BGR24) {
         par->format = AV_PIX_FMT_BGR24;
         par->bits_per_coded_sample = 24;
-        par->codec_tag = isAviMuxer ? MKTAG('D', 'I', 'B', ' ')
-                                    : MKTAG('B', 'G', 'R', ' ');
+        // Use 'DIB ' for AVI/MKV (VfW compat), 'BGR ' for MOV
+        par->codec_tag = (isAviMuxer || isMkvMuxer)
+                         ? MKTAG('D', 'I', 'B', ' ')
+                         : MKTAG('B', 'G', 'R', ' ');
         par->block_align = width * height * 3;
     } else if (srcFormat == VideoSourceFormat::RGB24) {
         par->format = AV_PIX_FMT_RGB24;
@@ -420,6 +569,8 @@ int RawRecorder::start(const char *path,
 
     outputPath = path ? path : "";
     srcFormat = srcFmt;
+    videoWidth = width;
+    videoHeight = height;
     headerWritten = false;
 
     if (container == ContainerFormat::AUTO) {
@@ -427,10 +578,12 @@ int RawRecorder::start(const char *path,
     }
 
     const char *muxerName = containerToMuxer(container);
+    LOGI("start(): path=%s muxer=%s container=%d srcFmt=%d",
+         outputPath.c_str(), muxerName, (int)container, (int)srcFmt);
 
     int ret = avformat_alloc_output_context2(&fmtCtx, nullptr, muxerName, outputPath.c_str());
     if (ret < 0 || !fmtCtx) {
-        LOGE("Failed to allocate output context");
+        LOGE("Failed to allocate output context for muxer '%s': %d", muxerName, ret);
         snprintf(errBuf, sizeof(errBuf), "avformat_alloc_output_context2 failed: %d", ret);
         cleanup();
         pthread_mutex_unlock(&mutex);
@@ -465,19 +618,32 @@ int RawRecorder::start(const char *path,
         }
     }
 
-    // Set stream timebases: video uses frame-rate timebase, audio uses sample-rate timebase
-    // AVI muxer uses stream timebase to write dwRate/dwScale in the header.
-    // Video must have a frame-rate denominator (e.g. 1/60) so players show correct FPS.
-    // Audio keeps 1/sampleRate so sample count can be used directly as PTS.
-    // We use av_write_frame (not av_interleaved_write_frame) so cross-stream duration
-    // rescaling (which could truncate audio duration to 0) is avoided.
+    // Set stream timebases and PTS strategy based on container type.
+    // We use av_write_frame (not av_interleaved_write_frame) so cross-stream
+    // duration rescaling (which could truncate audio duration to 0) is avoided.
+    activeContainer = container;
+    useWallClockPts = (container == ContainerFormat::MKV);
+    mkvVfwPositiveHeight = (container == ContainerFormat::MKV
+                            && (srcFmt == VideoSourceFormat::BGR24
+                                || srcFmt == VideoSourceFormat::RGB24));
+
     if (videoStream) {
-        videoStream->time_base = (AVRational){fpsDen, fpsNum};
-        LOGI("Video time_base set to %d/%d = 1/%d fps",
-             fpsDen, fpsNum, fps);
+        if (useWallClockPts) {
+            // MKV: use 1/1000 (ms) timebase for wall-clock PTS.
+            // This gives per-frame timing that tracks real delivery rate,
+            // keeping A/V sync correct even if actual fps ≠ nominal fps.
+            videoStream->time_base = (AVRational){1, 1000};
+            LOGI("Video time_base set to 1/1000 (wall-clock ms) for MKV");
+        } else {
+            // AVI/MOV: use frame-rate timebase (e.g. 1/60).
+            // AVI muxer needs this for dwRate/dwScale in the header.
+            videoStream->time_base = (AVRational){fpsDen, fpsNum};
+            LOGI("Video time_base set to %d/%d = 1/%d fps",
+                 fpsDen, fpsNum, fps);
+        }
     }
     if (audioStream) {
-        // already set in setupAudioStream, but log it here for clarity
+        // Audio always uses 1/sampleRate so PTS = sample count.
         LOGI("Audio time_base is 1/%d (sample rate)", audioSampleRate);
     }
 
@@ -494,11 +660,41 @@ int RawRecorder::start(const char *path,
         }
     }
 
-    ret = avformat_write_header(fmtCtx, nullptr);
+    LOGI("About to write header: video codec_id=%d codec_tag=0x%08x pix_fmt=%d, audio=%s",
+         videoStream ? (int)videoStream->codecpar->codec_id : -1,
+         videoStream ? videoStream->codecpar->codec_tag : 0,
+         videoStream ? videoStream->codecpar->format : -1,
+         audioStream ? "yes" : "no");
+
+    AVDictionary *headerOptions = nullptr;
+    if (container == ContainerFormat::MKV
+        && videoStream
+        && videoStream->codecpar
+        && videoStream->codecpar->codec_id == AV_CODEC_ID_RAWVIDEO) {
+        // Matroska refuses raw RGB/BGR by default and returns EINVAL unless
+        // this muxer option is enabled.  With allow_raw_vfw=1, FFmpeg stores
+        // rawvideo as V_MS/VFW/FOURCC using the codec_tag/BITMAPINFOHEADER.
+        av_dict_set(&headerOptions, "allow_raw_vfw", "1", 0);
+        // Do NOT set Matroska "live=1" here.  Live mode omits the Info
+        // Duration element, so MediaInfo/ffprobe cannot report a real file
+        // duration and may estimate a bogus duration from bitrate.  We keep
+        // normal (seekable) Matroska output and repair Segment size after
+        // closing if necessary.
+        LOGI("MKV rawvideo: set muxer option allow_raw_vfw=1");
+    }
+
+    ret = avformat_write_header(fmtCtx, &headerOptions);
+    if (headerOptions) {
+        AVDictionaryEntry *e = nullptr;
+        while ((e = av_dict_get(headerOptions, "", e, AV_DICT_IGNORE_SUFFIX)) != nullptr) {
+            LOGW("Unused muxer option after avformat_write_header: %s=%s", e->key, e->value);
+        }
+        av_dict_free(&headerOptions);
+    }
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, AV_ERROR_MAX_STRING_SIZE);
-        LOGE("Failed to write header: %s", errbuf);
+        LOGE("Failed to write header: %s (muxer=%s)", errbuf, fmtCtx->oformat->name);
         snprintf(errBuf, sizeof(errBuf), "avformat_write_header failed: %s", errbuf);
         cleanup();
         pthread_mutex_unlock(&mutex);
@@ -514,6 +710,11 @@ int RawRecorder::start(const char *path,
     // fpsNum/fpsDen already set before setupStream
     videoStreamIndex = videoStream ? videoStream->index : -1;
     expectedVideoFrameBytes = expected_video_frame_bytes(srcFormat, width, height);
+    
+    // Initialize audio-video sync variables
+    firstVideoTimeMs = 0;
+    firstAudioTimeMs = 0;
+    audioTimeOffsetSamples = 0;
 
     pthread_mutex_lock(&queueMutex);
     writerStopRequested = false;
@@ -570,7 +771,15 @@ void RawRecorder::stop() {
     int ret = av_write_trailer(fmtCtx);
     LOGI("RawRecorder::stop: av_write_trailer returned %d", ret);
 
-    if (fmtCtx->pb && !(fmtCtx->flags & AVFMT_NOFILE)) {
+    const bool shouldPatchMkvAfterClose = (activeContainer == ContainerFormat::MKV);
+
+    // AVI-only legacy header patch:
+    // offset 48 is dwTotalFrames in an AVI header.  Never write this into
+    // MKV/MOV/MP4 — doing so corrupts the EBML/ISO container header and
+    // causes MediaInfo errors such as "File size is less than expected" and
+    // bogus dimensions (e.g. height shown as 4294966216).
+    if (activeContainer == ContainerFormat::AVI
+        && fmtCtx->pb && !(fmtCtx->flags & AVFMT_NOFILE)) {
         int64_t fileSize = avio_size(fmtCtx->pb);
         if (fileSize > 0 && frameCount > 0) {
             int64_t curPos = avio_tell(fmtCtx->pb);
@@ -590,6 +799,13 @@ void RawRecorder::stop() {
          outputPath.c_str(), frameCount, droppedVideoCount);
 
     cleanup();
+
+    if (shouldPatchMkvAfterClose) {
+        patch_mkv_segment_size(outputPath);
+        if (mkvVfwPositiveHeight) {
+            patch_mkv_vfw_height_positive(outputPath, videoWidth, videoHeight);
+        }
+    }
     pthread_mutex_unlock(&mutex);
 }
 
@@ -752,6 +968,25 @@ int RawRecorder::writeAudio(const uint8_t *data, size_t len, int64_t pts) {
     int64_t audioEnqueueTimeMs = getCurrentTimeMs();
     pkt->opaque = reinterpret_cast<void*>(static_cast<intptr_t>(audioEnqueueTimeMs));
 
+    // Record first audio data arrival time for audio-video sync
+    if (firstAudioTimeMs == 0) {
+        firstAudioTimeMs = audioEnqueueTimeMs;
+        LOGI("First audio data arrived at %lld ms", (long long)firstAudioTimeMs);
+        
+        // Calculate audio time offset to align with video
+        if (firstVideoTimeMs > 0 && audioSampleRate > 0) {
+            int64_t delayMs = firstAudioTimeMs - firstVideoTimeMs;
+            if (delayMs > 0) {
+                // Audio arrived later than video, calculate offset in samples
+                audioTimeOffsetSamples = (delayMs * audioSampleRate) / 1000;
+                LOGI("Audio-video sync: audio delayed by %lld ms = %lld samples",
+                     (long long)delayMs, (long long)audioTimeOffsetSamples);
+            } else {
+                LOGI("Audio-video sync: audio arrived before video by %lld ms", (long long)(-delayMs));
+            }
+        }
+    }
+
     // Push to audio queue (non-blocking — never stalls the USB callback)
     pthread_mutex_lock(&queueMutex);
     if (writerStopRequested) {
@@ -770,9 +1005,29 @@ int RawRecorder::writeAudio(const uint8_t *data, size_t len, int64_t pts) {
         }
     }
     // Use raw sample count as PTS - simplest and most accurate for PCM audio
-    // AVI will calculate actual timing based on sample rate
-    int64_t audioPts = audioSampleCount;
+    // Apply audio-video sync offset to align with video timestamp
+    int64_t audioPts = audioSampleCount + audioTimeOffsetSamples;
     int64_t audioDur = sampleCount;
+
+    // Log sync status periodically (every 30 seconds)
+    int64_t currentTimeMs = getCurrentTimeMs();
+    if (currentTimeMs - lastSyncLogTimeMs > 30000) {
+        lastSyncLogTimeMs = currentTimeMs;
+        int64_t recordingTimeSec = (currentTimeMs - recordStartTimeMs) / 1000;
+        LOGI("Audio-video sync status (t=%llds): audioSamples=%lld, videoFrames=%lld, audioOffset=%lld samples",
+             (long long)recordingTimeSec, (long long)audioSampleCount, 
+             (long long)queuedVideoCount, (long long)audioTimeOffsetSamples);
+        
+        // Calculate expected audio samples based on recording time
+        if (audioSampleRate > 0) {
+            int64_t expectedAudioSamples = recordingTimeSec * audioSampleRate;
+            int64_t audioSampleDiff = audioSampleCount - expectedAudioSamples;
+            if (audioSampleDiff != 0) {
+                LOGI("Audio sample drift: %lld samples (%lld ms)", 
+                     (long long)audioSampleDiff, (long long)(audioSampleDiff * 1000 / audioSampleRate));
+            }
+        }
+    }
 
     pkt->pts = audioPts;
     pkt->dts = audioPts;
@@ -807,6 +1062,31 @@ int RawRecorder::writeAudioPacket(AVPacket *pkt) {
         pthread_mutex_unlock(&mutex);
         return -1;
     }
+
+    // writerLoop creates audio packet PTS/duration in SAMPLE units to preserve
+    // the exact captured waveform.  av_write_frame requires packet timestamps
+    // in audioStream->time_base.  Matroska commonly rewrites audio time_base
+    // to 1/1000 after avformat_write_header; if we pass sample-count PTS
+    // directly, 10 seconds at 96 kHz is interpreted as 960000 milliseconds
+    // (~16 minutes).  Rescale here using cumulative sample positions, and
+    // compute duration from end-start to avoid long-term rounding drift.
+    if (audioSampleRate > 0) {
+        const AVRational sampleTb = (AVRational){1, audioSampleRate};
+        int64_t sampleStart = pkt->pts;
+        int64_t sampleDur = pkt->duration;
+        if (sampleStart == AV_NOPTS_VALUE) {
+            sampleStart = 0;
+        }
+        if (sampleDur < 0) {
+            sampleDur = 0;
+        }
+        const int64_t tsStart = av_rescale_q(sampleStart, sampleTb, audioStream->time_base);
+        const int64_t tsEnd = av_rescale_q(sampleStart + sampleDur, sampleTb, audioStream->time_base);
+        pkt->pts = tsStart;
+        pkt->dts = tsStart;
+        pkt->duration = std::max<int64_t>(1, tsEnd - tsStart);
+    }
+
     int ret = av_write_frame(fmtCtx, pkt);
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
@@ -855,25 +1135,56 @@ int RawRecorder::writeFrame(const uint8_t *data, size_t len, int64_t pts) {
         return -1;
     }
 
-    memcpy(pkt->data, data, len);
+    if (mkvVfwPositiveHeight
+        && (srcFormat == VideoSourceFormat::BGR24 || srcFormat == VideoSourceFormat::RGB24)
+        && videoWidth > 0 && videoHeight > 0
+        && len == static_cast<size_t>(videoWidth) * static_cast<size_t>(videoHeight) * 3) {
+        // After patching the MKV VfW BITMAPINFOHEADER to a positive height,
+        // the DIB is interpreted as bottom-up.  UVC RGB/BGR frames arrive
+        // top-down, so store rows in reverse order to keep playback upright
+        // while MediaInfo reports a normal positive height.
+        const size_t rowBytes = static_cast<size_t>(videoWidth) * 3;
+        for (int y = 0; y < videoHeight; ++y) {
+            memcpy(pkt->data + static_cast<size_t>(y) * rowBytes,
+                   data + static_cast<size_t>(videoHeight - 1 - y) * rowBytes,
+                   rowBytes);
+        }
+    } else {
+        memcpy(pkt->data, data, len);
+    }
 
     // Store wall-clock enqueue time in opaque for latency measurement
     int64_t videoEnqueueTimeMs = getCurrentTimeMs();
     pkt->opaque = reinterpret_cast<void*>(static_cast<intptr_t>(videoEnqueueTimeMs));
 
-    // Use frame-rate timebase for PTS (e.g. 1/60).
-    // Each frame has PTS = frame_number, duration = 1 (one frame in timebase units).
-    int64_t seq = __sync_fetch_and_add(&queuedVideoCount, 1);
-    if (pts < 0) {
-        pkt->pts = seq;
-        pkt->dts = seq;
-    } else {
-        // Convert external PTS (milliseconds) to video timebase (1/fps)
-        // ms * fps / 1000 = frame index
-        pkt->pts = (pts * fpsNum) / (1000 * fpsDen);
-        pkt->dts = pkt->pts;
+    // Record first video frame arrival time for audio-video sync
+    if (firstVideoTimeMs == 0) {
+        firstVideoTimeMs = videoEnqueueTimeMs;
+        LOGI("First video frame arrived at %lld ms", (long long)firstVideoTimeMs);
     }
-    pkt->duration = 1;
+
+    int64_t seq = __sync_fetch_and_add(&queuedVideoCount, 1);
+
+    if (useWallClockPts) {
+        // MKV: wall-clock PTS in milliseconds (timebase = 1/1000).
+        // This tracks actual frame delivery timing, so A/V sync is
+        // correct even if real fps differs from nominal fps.
+        int64_t elapsedMs = videoEnqueueTimeMs - recordStartTimeMs;
+        if (elapsedMs < 0) elapsedMs = 0;
+        pkt->pts = elapsedMs;
+        pkt->dts = elapsedMs;
+        pkt->duration = (fpsNum > 0) ? (1000 * fpsDen / fpsNum) : 16; // nominal frame duration in ms
+    } else {
+        // AVI/MOV: frame-count PTS (timebase = 1/fps).
+        if (pts < 0) {
+            pkt->pts = seq;
+            pkt->dts = seq;
+        } else {
+            pkt->pts = (pts * fpsNum) / (1000 * fpsDen);
+            pkt->dts = pkt->pts;
+        }
+        pkt->duration = 1;
+    }
     pkt->stream_index = videoStreamIndex;
     pkt->flags |= AV_PKT_FLAG_KEY;
 

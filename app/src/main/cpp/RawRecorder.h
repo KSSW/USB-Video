@@ -73,6 +73,12 @@ public:
 
     const char *getLastError() const;
 
+    // Stats for UI overlay
+    int64_t getVideoFramesWritten() const { return videoFramesWritten; }
+    int64_t getAudioSamplesWritten() const { return audioSamplesWritten; }
+    int64_t getDroppedVideoCount() const { return droppedVideoCount; }
+    std::string getOutputPath() const { return outputPath; }
+
 private:
     AVFormatContext *fmtCtx = nullptr;
     AVStream *videoStream = nullptr;
@@ -82,7 +88,12 @@ private:
     int64_t startTimeMs = 0;
     int fpsNum = 30;
     int fpsDen = 1;
+    int videoWidth = 0;
+    int videoHeight = 0;
     VideoSourceFormat srcFormat = VideoSourceFormat::UNKNOWN;
+    ContainerFormat activeContainer = ContainerFormat::AVI;
+    bool useWallClockPts = false;  // true for MKV (VFR-capable containers)
+    bool mkvVfwPositiveHeight = false; // true when MKV VfW header was patched to positive height
     std::string outputPath;
     char errBuf[256];
     std::atomic<bool> recordingActive{false};
@@ -111,6 +122,11 @@ private:
     int64_t audioSamplesWritten = 0;   // cumulative audio samples written to file
     int64_t videoFramesWritten = 0;    // cumulative video frames written to file
     int64_t lastSyncLogTimeMs = 0;     // last time sync log was printed
+    
+    // Audio-video sync: record first video and audio arrival times
+    int64_t firstVideoTimeMs = 0;      // wall-clock time of first video frame
+    int64_t firstAudioTimeMs = 0;      // wall-clock time of first audio data
+    int64_t audioTimeOffsetSamples = 0; // audio PTS offset to align with video
 
     int64_t getCurrentTimeMs() const;
 

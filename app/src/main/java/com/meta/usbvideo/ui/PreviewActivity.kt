@@ -6,7 +6,12 @@ import android.content.res.ColorStateList
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Bundle
+import android.os.Environment
 import android.os.SystemClock
+import android.net.Uri
+import android.net.wifi.WifiManager
+import android.provider.DocumentsContract
+import android.provider.Settings
 import android.util.Log
 import com.meta.usbvideo.util.FileLogger
 import android.view.LayoutInflater
@@ -39,6 +44,7 @@ import com.meta.usbvideo.ui.AudioLevelMeterView
 import com.meta.usbvideo.record.RawMuxer
 import com.meta.usbvideo.record.RawRecorder
 import com.meta.usbvideo.record.ContainerFormat
+import com.meta.usbvideo.timecode.TimeCodeAlignmentReceiver
 import com.meta.usbvideo.usb.AudioStreamingConnection
 import com.meta.usbvideo.usb.UacManager
 import com.meta.usbvideo.usb.UsbDeviceState
@@ -55,6 +61,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.io.File
+import java.net.InetAddress
 import java.text.DecimalFormat
 import java.util.Locale
 import java.util.Timer
@@ -81,6 +88,9 @@ class PreviewActivity : AppCompatActivity() {
     private lateinit var audioLevelMeter: AudioLevelMeterView
     private lateinit var btnSelectDevice: com.google.android.material.button.MaterialButton
     private lateinit var connectTipContainer: View
+    private lateinit var recordingStatsContainer: View
+    private lateinit var tvRecordFrameInfo: android.widget.TextView
+    private lateinit var tvRecordStorageInfo: android.widget.TextView
 
     // Components
     private val videoRenderer = VideoRenderer()
@@ -98,6 +108,7 @@ class PreviewActivity : AppCompatActivity() {
     private var isConnecting = false
     private var currentVideoFormat: VideoFormat? = null
     private var recordTimer: Timer? = null
+    private var recordStatsTimer: Timer? = null
     private var recordStartTime = 0L
     private var stateObserverJob: Job? = null
     private var usbPollingJob: Job? = null
@@ -107,6 +118,13 @@ class PreviewActivity : AppCompatActivity() {
     private var pendingRestartUsbDevice: UsbDevice? = null
     private var pendingRestartAudioConn: AudioStreamingConnection? = null
     private var pendingRestartVideoConn: VideoStreamingConnection? = null
+    private var timeCodeAlignmentEnabled = false
+    private var timeCodeAlignmentObsHost = ""
+    private var timeCodeAlignmentReceiver: TimeCodeAlignmentReceiver? = null
+    private var timeCodeMulticastLock: WifiManager.MulticastLock? = null
+    private var lastTimeCodeTriggerKey = ""
+    private var lastTimeCodeTriggerAtMs = 0L
+    private var obsHoveringRecordButton = false
 
     // Audio format info for recording
     private var audioSampleRate: Int = 0
@@ -148,10 +166,44 @@ class PreviewActivity : AppCompatActivity() {
         Log.i(TAG, "Storage permission granted: $granted")
     }
 
+    private var saveFilesPathTextView: TextView? = null
+
+    private val outputFolderPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri == null) return@registerForActivityResult
+
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "takePersistableUriPermission failed for $uri", e)
+        }
+
+        val dir = resolveTreeUriToDirectFile(uri)
+        if (dir == null) {
+            Toast.makeText(
+                this,
+                "Please choose a folder under internal shared storage for native direct write.",
+                Toast.LENGTH_LONG
+            ).show()
+            return@registerForActivityResult
+        }
+
+        RawRecorder.setCustomOutputBaseDir(applicationContext, dir.absolutePath)
+        saveFilesPathTextView?.text = buildSaveFilesPathText()
+        Toast.makeText(this, "Save folder: ${dir.absolutePath}", Toast.LENGTH_LONG).show()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         FileLogger.init(applicationContext)
         FileLogger.log(TAG, "onCreate")
+        // JNI logging bridge disabled due to class loading issues in RawRecorderThread
+        // Use adb logcat to view RawRecorder logs: adb logcat | findstr "RawRecorder"
+        // UsbVideoNativeLibrary.setRecorderLogger()
         UvcManager.initContext(applicationContext)
         currentVideoFormat = UvcManager.currentVideoFormat
         setContentView(R.layout.activity_preview)
@@ -178,6 +230,7 @@ class PreviewActivity : AppCompatActivity() {
         FileLogger.log(TAG, "Restored captureAudioChannel=$captureAudioChannel → desiredAudioChannelCount=$chCount")
 
         loadPreviewInfoSettings()
+        updateTimeCodeAlignmentReceiver()
 
         setupVideoRenderer()
         setupClickListeners()
@@ -255,6 +308,9 @@ class PreviewActivity : AppCompatActivity() {
         usbPollingJob?.cancel()
         stateObserverJob?.cancel()
         usbAudioPlayer.stop()
+        timeCodeAlignmentReceiver?.stop()
+        timeCodeAlignmentReceiver = null
+        releaseTimeCodeMulticastLock()
         UsbMonitor.disconnect()
         FileLogger.close()
     }
@@ -274,6 +330,9 @@ class PreviewActivity : AppCompatActivity() {
         audioLevelMeter = findViewById(R.id.audioLevelMeter)
         btnSelectDevice = findViewById(R.id.btnSelectDevice)
         connectTipContainer = findViewById(R.id.connectTipContainer)
+        recordingStatsContainer = findViewById(R.id.recordingStatsContainer)
+        tvRecordFrameInfo = findViewById(R.id.tvRecordFrameInfo)
+        tvRecordStorageInfo = findViewById(R.id.tvRecordStorageInfo)
     }
 
     // ---- Video renderer setup ----
@@ -567,6 +626,21 @@ class PreviewActivity : AppCompatActivity() {
                     } catch (e: Exception) {
                         FileLogger.log(TAG, "UVC_XU_Diag error: ${e.message}")
                     }
+
+                    // Log HDMI InfoFrame diagnostics to check for multichannel audio metadata
+                    try {
+                        val hdmiDiag = UsbVideoNativeLibrary.getHdmiInfoFrameDiagnostics()
+                        FileLogger.log(TAG, "HDMI_InfoFrame_Diag:\n$hdmiDiag")
+                        
+                        // Parse HDMI Audio InfoFrame for multichannel detection
+                        val parsedInfo = parseHdmiAudioInfoFrame(hdmiDiag)
+                        if (parsedInfo.isNotEmpty()) {
+                            FileLogger.log(TAG, "HDMI Audio InfoFrame Parsed: $parsedInfo")
+                            Log.i(TAG, "HDMI Audio InfoFrame: $parsedInfo")
+                        }
+                    } catch (e: Exception) {
+                        FileLogger.log(TAG, "HDMI_InfoFrame_Diag error: ${e.message}")
+                    }
                 }
 
                 UsbMonitor.setState(
@@ -776,9 +850,9 @@ class PreviewActivity : AppCompatActivity() {
             // Buttons enabled only when FPS is ready (after format switch)
             if (!isRecording) {
                 fabPicture.isEnabled = isFpsReady
-                fabVideo.isEnabled = isFpsReady
+                fabVideo.isEnabled = if (obsHoveringRecordButton) false else isFpsReady
                 fabPicture.alpha = if (isFpsReady) 1.0f else 0.4f
-                fabVideo.alpha = if (isFpsReady) 1.0f else 0.4f
+                fabVideo.alpha = if (obsHoveringRecordButton) 0.4f else if (isFpsReady) 1.0f else 0.4f
             }
 
             // Update record button color
@@ -833,7 +907,16 @@ class PreviewActivity : AppCompatActivity() {
             if (recVideoFormat == "Copy") {
                 // Use native RawRecorder (ffmpeg passthrough)
                 val timestamp = java.text.SimpleDateFormat("yyyy_MM_dd_HH_mm_ss", java.util.Locale.getDefault()).format(java.util.Date())
-                val ext = when (recMux) {
+
+                // For non-MJPEG raw formats (GBR24, YUYV, etc.), force MKV container.
+                // MKV supports variable-frame-rate via PTS, which:
+                //   1) Keeps A/V sync correct even if actual fps ≠ nominal fps
+                //   2) Preserves audio waveform intact (no trimming) for
+                //      external sync with OBS 7.1ch recordings in DaVinci
+                val isMjpeg = format.fourccFormat.equals("MJPG", ignoreCase = true)
+                val effectiveMux = if (!isMjpeg) "MKV" else recMux.uppercase()
+
+                val ext = when (effectiveMux) {
                     "AVI" -> "avi"
                     "MP4" -> "mp4"
                     "MOV" -> "mov"
@@ -841,25 +924,39 @@ class PreviewActivity : AppCompatActivity() {
                     else -> "avi"
                 }
                 val outputFile = File(RawRecorder.getVideoOutputDir(), "VID_$timestamp.$ext")
-                val container = when (recMux) {
-                    "avi" -> ContainerFormat.AVI
-                    "mp4" -> ContainerFormat.MP4
-                    "mov" -> ContainerFormat.MOV
-                    "mkv" -> ContainerFormat.MKV
+                val container = when (effectiveMux) {
+                    "AVI" -> ContainerFormat.AVI
+                    "MP4" -> ContainerFormat.MP4
+                    "MOV" -> ContainerFormat.MOV
+                    "MKV" -> ContainerFormat.MKV
                     else -> ContainerFormat.AVI
                 }
+                // Force stereo recording for U4 4K60 device
+                val deviceName = when (val s = UsbMonitor.usbDeviceState) {
+                    is UsbDeviceState.Connected -> s.usbDevice.productName
+                    is UsbDeviceState.Streaming -> s.usbDevice.productName
+                    is UsbDeviceState.StreamingStopped -> s.usbDevice.productName
+                    else -> null
+                }
+                val isU4Device = deviceName?.contains("U4 4K60", ignoreCase = true) == true
+                val recordChannels = if (isU4Device) 2 else audioChannels
+                
                 val success = UsbVideoNativeLibrary.startRecording(
                     outputFile.absolutePath,
                     container,
                     audioSampleRate,
-                    audioChannels,
+                    recordChannels,
                     audioBitsPerSample
                 )
                 if (success) {
                     isRecording = true
                     startRecordTimer()
                 } else {
-                    Toast.makeText(this, "Failed to start recording: ${UsbVideoNativeLibrary.isRecordingNative()}", Toast.LENGTH_LONG).show()
+                    val err = UsbVideoNativeLibrary.getLastErrorNative().ifBlank {
+                        "isRecording=${UsbVideoNativeLibrary.isRecordingNative()}"
+                    }
+                    FileLogger.error(TAG, "Failed to start recording: $err")
+                    Toast.makeText(this, "Failed to start recording: $err", Toast.LENGTH_LONG).show()
                 }
             } else {
                 // Use MediaCodec H.264 encoder (RawMuxer)
@@ -910,7 +1007,29 @@ class PreviewActivity : AppCompatActivity() {
             fabPicture.isEnabled = true
             btnMenu.isEnabled = true
         }
+        if (timeCodeAlignmentEnabled && timeCodeAlignmentObsHost.isNotBlank()) {
+            sendTimeCodeAlignmentCommand(if (isRecording) "START" else "STOP")
+        }
         updateUIControls()
+    }
+
+    private fun sendTimeCodeAlignmentCommand(command: String) {
+        val host = timeCodeAlignmentObsHost.trim()
+        if (host.isEmpty()) return
+        Thread {
+            try {
+                val socket = java.net.DatagramSocket()
+                socket.broadcast = true
+                val message = "${TimeCodeAlignmentReceiver.MAGIC} $command ${System.currentTimeMillis()}"
+                val data = message.toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+                val address = java.net.InetAddress.getByName(host)
+                socket.send(java.net.DatagramPacket(data, data.size, address, TimeCodeAlignmentReceiver.PORT))
+                socket.close()
+                FileLogger.log(TAG, "Sent TimeCode command $command to $host:${TimeCodeAlignmentReceiver.PORT}")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to send TimeCode command $command", e)
+            }
+        }.start()
     }
 
     private fun startRecordTimer() {
@@ -926,6 +1045,7 @@ class PreviewActivity : AppCompatActivity() {
                 }
             }, 250, 250)
         }
+        startRecordStatsTimer()
     }
 
     private fun stopRecordTimer() {
@@ -934,6 +1054,67 @@ class PreviewActivity : AppCompatActivity() {
         recordStartTime = 0
         tvRecordTime.visibility = View.GONE
         tvRecordTime.text = "00:00:00"
+        stopRecordStatsTimer()
+    }
+
+    private fun startRecordStatsTimer() {
+        if (!showRecordingStats) {
+            recordingStatsContainer.visibility = View.GONE
+            return
+        }
+        recordingStatsContainer.visibility = View.VISIBLE
+        tvRecordFrameInfo.text = "0 Frames | --"
+        tvRecordStorageInfo.text = "0 B | Free: --"
+        recordStatsTimer = Timer().apply {
+            scheduleAtFixedRate(object : TimerTask() {
+                override fun run() {
+                    try {
+                        val stats = UsbVideoNativeLibrary.getRecordingStatsNative()
+                        val videoFrames = stats[0]
+                        val dropped = stats[2]
+                        val fileSize = stats[3]
+
+                        val elapsedSec = (SystemClock.elapsedRealtime() - recordStartTime) / 1000.0
+                        val fps = currentVideoFormat?.fps ?: 60
+
+                        val frameStatus = if (elapsedSec < 1.0) {
+                            "$videoFrames Frames | Measuring..."
+                        } else {
+                            val actualFps = videoFrames / elapsedSec
+                            if (dropped == 0L && actualFps >= fps * 0.95) {
+                                "$videoFrames Frames | Continuous OK"
+                            } else {
+                                "$videoFrames Frames | ${String.format("%.1f", actualFps)} fps (drop: $dropped)"
+                            }
+                        }
+
+                        val fileSizeStr = formatBytes(fileSize)
+                        val freeBytes = FileLogger.getFreeStorageBytes()
+                        val freeStr = formatBytes(freeBytes)
+
+                        runOnUiThread {
+                            tvRecordFrameInfo.text = frameStatus
+                            tvRecordStorageInfo.text = "$fileSizeStr | Free: $freeStr"
+                        }
+                    } catch (_: Exception) {}
+                }
+            }, 500, 500)
+        }
+    }
+
+    private fun stopRecordStatsTimer() {
+        recordStatsTimer?.cancel()
+        recordStatsTimer = null
+        recordingStatsContainer.visibility = View.GONE
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        return when {
+            bytes >= 1_073_741_824L -> String.format("%.1f GB", bytes / 1_073_741_824.0)
+            bytes >= 1_048_576L -> String.format("%.1f MB", bytes / 1_048_576.0)
+            bytes >= 1024L -> String.format("%.1f KB", bytes / 1024.0)
+            else -> "$bytes B"
+        }
     }
 
     // ---- Menu actions ----
@@ -950,6 +1131,7 @@ class PreviewActivity : AppCompatActivity() {
     // Preview info & audio level meter visibility toggles
     private var showPreviewInfo = true
     private var showAudioLevelMeter = true
+    private var showRecordingStats = false
 
     private fun loadCaptureAudioChannel(): String {
         val prefs = getSharedPreferences("usb_video_prefs", MODE_PRIVATE)
@@ -965,13 +1147,140 @@ class PreviewActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("usb_video_prefs", MODE_PRIVATE)
         showPreviewInfo = prefs.getBoolean("show_preview_info", true)
         showAudioLevelMeter = prefs.getBoolean("show_audio_level_meter", true)
+        showRecordingStats = prefs.getBoolean("show_recording_stats", false)
+        timeCodeAlignmentEnabled = prefs.getBoolean("timecode_alignment_enabled", false)
+        timeCodeAlignmentObsHost = prefs.getString("timecode_alignment_obs_host", "") ?: ""
     }
 
     private fun savePreviewInfoSettings() {
         getSharedPreferences("usb_video_prefs", MODE_PRIVATE).edit()
             .putBoolean("show_preview_info", showPreviewInfo)
             .putBoolean("show_audio_level_meter", showAudioLevelMeter)
+            .putBoolean("show_recording_stats", showRecordingStats)
+            .putBoolean("timecode_alignment_enabled", timeCodeAlignmentEnabled)
+            .putString("timecode_alignment_obs_host", timeCodeAlignmentObsHost)
             .apply()
+    }
+
+    private fun buildTimeCodeAlignmentInfoText(): String {
+        val ips = TimeCodeAlignmentReceiver.getLocalIpv4Addresses()
+        val ipText = if (ips.isEmpty()) "IP: --" else "IP: ${ips.joinToString(", ")}"
+        val stateText = if (timeCodeAlignmentEnabled) "ON - waiting for OBS" else "OFF"
+        val obsText = if (timeCodeAlignmentObsHost.isBlank()) "OBS PC: Auto/Broadcast" else "OBS PC: $timeCodeAlignmentObsHost"
+        return "$stateText\n$ipText\n$obsText\nUDP port: ${TimeCodeAlignmentReceiver.PORT}"
+    }
+
+    private fun updateTimeCodeAlignmentReceiver() {
+        if (timeCodeAlignmentEnabled) {
+            if (timeCodeAlignmentReceiver == null) {
+                acquireTimeCodeMulticastLock()
+                timeCodeAlignmentReceiver = TimeCodeAlignmentReceiver(
+                    onCommand = { command, source, sentAtMs ->
+                        handleTimeCodeAlignmentCommand(command, source, sentAtMs)
+                    },
+                    statusProvider = {
+                        buildTimeCodeAlignmentStatusPayload()
+                    },
+                    directStatusHostProvider = {
+                        timeCodeAlignmentObsHost.takeIf { it.isNotBlank() }
+                    }
+                ).also { it.start() }
+                FileLogger.log(TAG, "TimeCode Alignment UDP receiver started")
+            }
+        } else {
+            timeCodeAlignmentReceiver?.stop()
+            timeCodeAlignmentReceiver = null
+            releaseTimeCodeMulticastLock()
+            FileLogger.log(TAG, "TimeCode Alignment UDP receiver stopped")
+        }
+    }
+
+    private fun acquireTimeCodeMulticastLock() {
+        if (timeCodeMulticastLock?.isHeld == true) {
+            return
+        }
+        try {
+            val wifi = applicationContext.getSystemService(WIFI_SERVICE) as? WifiManager
+            timeCodeMulticastLock = wifi?.createMulticastLock("usb_video_timecode_alignment")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            FileLogger.log(TAG, "TimeCode Alignment Wi-Fi multicast lock acquired")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to acquire multicast lock", e)
+        }
+    }
+
+    private fun releaseTimeCodeMulticastLock() {
+        try {
+            timeCodeMulticastLock?.takeIf { it.isHeld }?.release()
+            timeCodeMulticastLock = null
+            FileLogger.log(TAG, "TimeCode Alignment Wi-Fi multicast lock released")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to release multicast lock", e)
+        }
+    }
+
+    private fun buildTimeCodeAlignmentStatusPayload(): String {
+        return "running=1 " +
+                "recording=${if (isRecording) 1 else 0} " +
+                "camera=${if (isCameraConnected) 1 else 0} " +
+                "fps=${if (isFpsReady) 1 else 0}"
+    }
+
+    private fun handleTimeCodeAlignmentCommand(
+        command: TimeCodeAlignmentReceiver.Command,
+        source: InetAddress,
+        sentAtMs: Long
+    ) {
+        val now = SystemClock.elapsedRealtime()
+        val key = "${source.hostAddress}:${command.name}:$sentAtMs"
+        if (key == lastTimeCodeTriggerKey && now - lastTimeCodeTriggerAtMs < 1500L) {
+            return
+        }
+        lastTimeCodeTriggerKey = key
+        lastTimeCodeTriggerAtMs = now
+
+        FileLogger.log(
+            TAG,
+            "TimeCode Alignment command=$command source=${source.hostAddress} sentAtMs=$sentAtMs isRecording=$isRecording connected=$isCameraConnected fpsReady=$isFpsReady"
+        )
+
+        runOnUiThread {
+            when (command) {
+                TimeCodeAlignmentReceiver.Command.START -> {
+                    if (!timeCodeAlignmentEnabled) return@runOnUiThread
+                    if (!isCameraConnected) {
+                        Toast.makeText(this, "OBS trigger received, but camera is not connected", Toast.LENGTH_SHORT).show()
+                        return@runOnUiThread
+                    }
+                    if (!isFpsReady) {
+                        Toast.makeText(this, "OBS trigger received, waiting for stable FPS", Toast.LENGTH_SHORT).show()
+                        return@runOnUiThread
+                    }
+                    if (!isRecording) {
+                        toggleRecord(true)
+                    }
+                }
+                TimeCodeAlignmentReceiver.Command.STOP -> {
+                    if (isRecording) {
+                        toggleRecord(false)
+                    }
+                }
+                TimeCodeAlignmentReceiver.Command.HOVER_START -> {
+                    obsHoveringRecordButton = true
+                    fabVideo.isEnabled = false
+                    fabVideo.alpha = 0.4f
+                    FileLogger.log(TAG, "TimeCode Alignment: disabled record button (OBS hover)")
+                }
+                TimeCodeAlignmentReceiver.Command.HOVER_END -> {
+                    obsHoveringRecordButton = false
+                    fabVideo.isEnabled = isFpsReady
+                    fabVideo.alpha = if (isFpsReady) 1.0f else 0.4f
+                    FileLogger.log(TAG, "TimeCode Alignment: enabled record button (OBS hover end)")
+                }
+            }
+        }
     }
 
     private fun showAboutDialog() {
@@ -980,6 +1289,90 @@ class PreviewActivity : AppCompatActivity() {
             .setView(view)
             .setPositiveButton(android.R.string.ok, null)
             .show()
+    }
+
+    private fun buildSaveFilesPathText(): String {
+        val base = RawRecorder.getOutputBasePath()
+        return "Save path: $base\nVideo: $base/Video\nAudio: $base/Audio\nPictures: $base/Pictures"
+    }
+
+    private fun requestAllFilesAccessIfNeeded(): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
+            return false
+        }
+        if (Environment.isExternalStorageManager()) {
+            return false
+        }
+
+        Toast.makeText(
+            this,
+            "Please enable All files access, then choose the save folder again.",
+            Toast.LENGTH_LONG
+        ).show()
+
+        try {
+            startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                data = Uri.parse("package:$packageName")
+            })
+        } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+        }
+        return true
+    }
+
+    private fun openSaveFolderPicker() {
+        if (requestAllFilesAccessIfNeeded()) {
+            return
+        }
+        outputFolderPickerLauncher.launch(null)
+    }
+
+    private fun resolveTreeUriToDirectFile(uri: Uri): File? {
+        return try {
+            val docId = DocumentsContract.getTreeDocumentId(uri)
+            when {
+                docId.startsWith("raw:") -> {
+                    File(docId.removePrefix("raw:")).absoluteFile
+                }
+                docId == "primary:" || docId == "primary" -> {
+                    Environment.getExternalStorageDirectory().absoluteFile
+                }
+                docId.startsWith("primary:") -> {
+                    val rel = docId.removePrefix("primary:").trim('/')
+                    if (rel.isEmpty()) {
+                        Environment.getExternalStorageDirectory().absoluteFile
+                    } else {
+                        File(Environment.getExternalStorageDirectory(), rel).absoluteFile
+                    }
+                }
+                docId == "home:" || docId == "home" -> {
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS).absoluteFile
+                }
+                docId.startsWith("home:") -> {
+                    val rel = docId.removePrefix("home:").trim('/')
+                    File(
+                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+                        rel
+                    ).absoluteFile
+                }
+                docId.contains(":") -> {
+                    val volumeId = docId.substringBefore(":")
+                    val rel = docId.substringAfter(":", "").trim('/')
+                    // External SD/USB storage.  SAF grants URI permission, while
+                    // MANAGE_EXTERNAL_STORAGE gives the native recorder the best
+                    // chance to write the direct filesystem path.
+                    val candidates = listOf(
+                        File("/storage/$volumeId", rel),
+                        File("/mnt/media_rw/$volumeId", rel)
+                    )
+                    candidates.firstOrNull { it.exists() || it.parentFile?.exists() == true }?.absoluteFile
+                }
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "resolveTreeUriToDirectFile failed: $uri", e)
+            null
+        }
     }
 
     private fun showSettingsDialog() {
@@ -994,6 +1387,11 @@ class PreviewActivity : AppCompatActivity() {
         val tvAudioInfo = view.findViewById<android.widget.TextView>(R.id.tvAudioInfo)
         val cbShowPreviewInfo = view.findViewById<android.widget.CheckBox>(R.id.cbShowPreviewInfo)
         val cbShowAudioLevelMeter = view.findViewById<android.widget.CheckBox>(R.id.cbShowAudioLevelMeter)
+        val tvSaveFilesPath = view.findViewById<TextView>(R.id.tvSaveFilesPath)
+        val btnSaveFilesSettings = view.findViewById<android.widget.Button>(R.id.btnSaveFilesSettings)
+        val switchTimeCodeAlignment = view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchTimeCodeAlignment)
+        val tvTimeCodeAlignmentInfo = view.findViewById<TextView>(R.id.tvTimeCodeAlignmentInfo)
+        val etTimeCodeObsHost = view.findViewById<android.widget.EditText>(R.id.etTimeCodeObsHost)
 
         val formats = UvcManager.videoFormats
         if (formats.isEmpty()) {
@@ -1090,7 +1488,20 @@ class PreviewActivity : AppCompatActivity() {
                 else -> null
             }
             val supportedMax = audioConn?.allAudioFormats?.maxOfOrNull { it.channelCount } ?: 0
-            if (desiredCh > supportedMax && supportedMax > 0) {
+            
+            // Check if device is U4 4K60 (force stereo mode)
+            val deviceName = when (val s = UsbMonitor.usbDeviceState) {
+                is UsbDeviceState.Connected -> s.usbDevice.productName
+                is UsbDeviceState.Streaming -> s.usbDevice.productName
+                is UsbDeviceState.StreamingStopped -> s.usbDevice.productName
+                else -> null
+            }
+            val isU4Device = deviceName?.contains("U4 4K60", ignoreCase = true) == true
+            
+            if (isU4Device && (selectedChannel == "5.1" || selectedChannel == "7.1")) {
+                tvChannelWarning.visibility = View.VISIBLE
+                tvChannelWarning.text = "The device does not support $selectedChannel (U4 4K60 Only 2.0 is supported.)"
+            } else if (desiredCh > supportedMax && supportedMax > 0) {
                 tvChannelWarning.visibility = View.VISIBLE
                 tvChannelWarning.text = "Device does not support $selectedChannel (max ${supportedMax}ch). " +
                         "Will fallback on reconnect. Audio monitoring still works."
@@ -1126,15 +1537,16 @@ class PreviewActivity : AppCompatActivity() {
 
         fun updateMuxOptions(videoFormat: String) {
             val muxOptions = if (videoFormat == "Copy") {
-                arrayOf("AVI")
+                arrayOf("AVI", "MKV")
             } else {
                 arrayOf("MP4")
             }
             spinnerMux.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, muxOptions)
                 .also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-            // Reset selection based on valid options
-            val defaultMux = if (videoFormat == "Copy") "AVI" else "MP4"
-            spinnerMux.setSelection(0)
+            // Default to MKV for Copy mode (better A/V sync for raw formats)
+            val defaultMux = if (videoFormat == "Copy") "MKV" else "MP4"
+            val idx = muxOptions.indexOf(defaultMux).coerceAtLeast(0)
+            spinnerMux.setSelection(idx)
         }
 
         // Set initial mux options based on current video format
@@ -1147,11 +1559,40 @@ class PreviewActivity : AppCompatActivity() {
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
 
+        // Save files settings
+        saveFilesPathTextView = tvSaveFilesPath
+        tvSaveFilesPath.text = buildSaveFilesPathText()
+        btnSaveFilesSettings.setOnClickListener {
+            openSaveFolderPicker()
+        }
+
         // Preview info checkboxes
         cbShowPreviewInfo.isChecked = showPreviewInfo
         cbShowAudioLevelMeter.isChecked = showAudioLevelMeter
 
-        AlertDialog.Builder(this)
+        // TimeCode Alignment LAN trigger
+        switchTimeCodeAlignment.isChecked = timeCodeAlignmentEnabled
+        etTimeCodeObsHost.setText(timeCodeAlignmentObsHost)
+        tvTimeCodeAlignmentInfo.text = buildTimeCodeAlignmentInfoText()
+        switchTimeCodeAlignment.setOnCheckedChangeListener { _, isChecked ->
+            timeCodeAlignmentEnabled = isChecked
+            timeCodeAlignmentObsHost = etTimeCodeObsHost.text?.toString()?.trim().orEmpty()
+            tvTimeCodeAlignmentInfo.text = buildTimeCodeAlignmentInfoText()
+            updateTimeCodeAlignmentReceiver()
+        }
+
+        // Log settings
+        val switchFileLogging = view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchFileLogging)
+        switchFileLogging.isChecked = FileLogger.enabled
+        switchFileLogging.setOnCheckedChangeListener { _, isChecked ->
+            FileLogger.enabled = isChecked
+        }
+
+        // Recording stats overlay toggle
+        val switchRecordingStats = view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchRecordingStats)
+        switchRecordingStats.isChecked = showRecordingStats
+
+        val dialog = AlertDialog.Builder(this)
             .setTitle(getString(R.string.settings_title))
             .setView(view)
             .setPositiveButton(android.R.string.ok) { _, _ ->
@@ -1194,7 +1635,11 @@ class PreviewActivity : AppCompatActivity() {
 
                 showPreviewInfo = cbShowPreviewInfo.isChecked
                 showAudioLevelMeter = cbShowAudioLevelMeter.isChecked
+                showRecordingStats = switchRecordingStats.isChecked
+                timeCodeAlignmentEnabled = switchTimeCodeAlignment.isChecked
+                timeCodeAlignmentObsHost = etTimeCodeObsHost.text?.toString()?.trim().orEmpty()
                 savePreviewInfoSettings()
+                updateTimeCodeAlignmentReceiver()
                 updateUIControls()
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -1440,6 +1885,118 @@ class PreviewActivity : AppCompatActivity() {
             }
         }
         dialog.show(supportFragmentManager, DeviceListDialogFragment.TAG)
+    }
+
+    // Parse HDMI Audio InfoFrame to extract multichannel audio information
+    private fun parseHdmiAudioInfoFrame(diag: String): String {
+        // Look for HDMI Audio InfoFrame header (0x84) in the diagnostic output
+        val lines = diag.lines()
+        var audioInfo = StringBuilder()
+        var foundAudioInfoFrame = false
+        
+        for (line in lines) {
+            if (line.contains(">>> Detected HDMI Audio InfoFrame!")) {
+                foundAudioInfoFrame = true
+                continue
+            }
+            
+            if (foundAudioInfoFrame) {
+                // Parse the Audio InfoFrame fields
+                if (line.contains("Audio Channels:")) {
+                    val match = Regex("Audio Channels: (\\d+)").find(line)
+                    if (match != null) {
+                        val channelCode = match.groupValues[1].toInt()
+                        val channelCount = when (channelCode) {
+                            0 -> 2
+                            1 -> 3
+                            2 -> 4
+                            3 -> 5
+                            4 -> 6
+                            5 -> 7
+                            6 -> 8
+                            else -> channelCode
+                        }
+                        audioInfo.append("HDMI reports $channelCount channels (code=$channelCode). ")
+                        
+                        if (channelCount >= 6) {
+                            audioInfo.append("[MULTICHANNEL DETECTED] ")
+                        }
+                    }
+                }
+                
+                if (line.contains("Coding Type:")) {
+                    val match = Regex("Coding Type: (\\d+)").find(line)
+                    if (match != null) {
+                        val codingType = match.groupValues[1].toInt()
+                        val codingName = when (codingType) {
+                            1 -> "LPCM (PCM)"
+                            2 -> "AC3 (Dolby Digital)"
+                            3 -> "MPEG1"
+                            4 -> "MPEG2"
+                            5 -> "AAC"
+                            6 -> "DTS"
+                            7 -> "ATRAC"
+                            else -> "Unknown"
+                        }
+                        audioInfo.append("Coding: $codingName. ")
+                    }
+                }
+                
+                if (line.contains("Sample Freq:")) {
+                    val match = Regex("Sample Freq: (\\d+)").find(line)
+                    if (match != null) {
+                        val freqCode = match.groupValues[1].toInt()
+                        val freq = when (freqCode) {
+                            1 -> 32000
+                            2 -> 44100
+                            3 -> 48000
+                            4 -> 88200
+                            5 -> 96000
+                            6 -> 176400
+                            7 -> 192000
+                            else -> freqCode
+                        }
+                        audioInfo.append("Sample Rate: ${freq}Hz. ")
+                    }
+                }
+                
+                if (line.contains("Sample Size:")) {
+                    val match = Regex("Sample Size: (\\d+)").find(line)
+                    if (match != null) {
+                        val sizeCode = match.groupValues[1].toInt()
+                        val size = when (sizeCode) {
+                            1 -> 16
+                            2 -> 20
+                            3 -> 24
+                            else -> sizeCode
+                        }
+                        audioInfo.append("Bit Depth: ${size}bit. ")
+                    }
+                }
+                
+                if (line.contains("Channel Alloc:")) {
+                    val match = Regex("Channel Alloc: (0x[0-9a-fA-F]+)").find(line)
+                    if (match != null) {
+                        val alloc = match.groupValues[1]
+                        audioInfo.append("Speaker Map: $alloc. ")
+                    }
+                }
+            }
+        }
+        
+        // If no Audio InfoFrame was detected, check if any vendor requests returned data
+        if (!foundAudioInfoFrame) {
+            val vendorDataFound = lines.any { it.contains("Vendor req") && it.contains("bytes") }
+            if (vendorDataFound) {
+                audioInfo.append("HDMI vendor data detected but no Audio InfoFrame (0x84 header). ")
+                audioInfo.append("Device may use proprietary HDMI metadata format.")
+            } else {
+                audioInfo.append("No HDMI metadata detected via USB control endpoint. ")
+                audioInfo.append("HDMI InfoFrames may be embedded in video stream or not exposed via USB.")
+            }
+        }
+        
+        return audioInfo.toString()
     }
 
     private fun safelyEject() {

@@ -64,6 +64,41 @@
             android:visibility="gone"
             tools:text="00:00:00" />
 
+        <!-- Recording stats overlay (frames, file size, storage) -->
+        <LinearLayout
+            android:id="@+id/recordingStatsContainer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_below="@id/tvVideoRecordTime"
+            android:layout_centerHorizontal="true"
+            android:layout_marginTop="4dp"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="#66000000"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tvRecordFrameInfo"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#AAFFAA"
+                android:textSize="12sp"
+                tools:text="1200 Frames | Continuous OK" />
+
+            <TextView
+                android:id="@+id/tvRecordStorageInfo"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#AAAAFF"
+                android:textSize="12sp"
+                tools:text="120 MB | Free: 95.5 GB" />
+
+        </LinearLayout>
+
         <!-- Preview info (format, resolution, fps) -->
         <TextView
             android:id="@+id/tvPreviewInfo"

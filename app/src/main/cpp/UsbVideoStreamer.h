@@ -91,12 +91,17 @@ class UsbVideoStreamer final {
   std::string statsSummaryString() const;
   uint8_t getFps() const { return stats_.fps; }
   const std::string& getXuDiagLog() const { return xuDiagLog_; }
+  const std::string& getHdmiInfoFrameLog() const { return hdmiInfoFrameLog_; }
 
   bool startRecording(const char* path, uvc::ContainerFormat container,
                       int audioSampleRate, int audioChannels, int audioBitsPerSample);
   void stopRecording();
   bool isRecording() const;
+  const std::string& getLastRecordingError() const { return lastRecordingError_; }
   void writeAudioToRecorder(const uint8_t* data, size_t len);
+
+  // Recording stats for UI: [videoFramesWritten, audioSamplesWritten, droppedVideoCount, fileSizeBytes]
+  void getRecordingStats(int64_t* videoFrames, int64_t* audioSamples, int64_t* dropped, int64_t* fileSize) const;
 
  private:
   uvc_context_t* uvcContext_{};
@@ -120,8 +125,11 @@ class UsbVideoStreamer final {
 
   UsbVideoStreamerStats stats_{};
   std::string xuDiagLog_;  // UVC Extension Unit diagnostic info
+  std::string hdmiInfoFrameLog_;  // HDMI InfoFrame capture data
 
   void enumerateExtensionUnits();
+  void captureHdmiInfoFrames();
 
   std::unique_ptr<uvc::RawRecorder> recorder_;
+  std::string lastRecordingError_;
 };
